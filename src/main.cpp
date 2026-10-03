@@ -1,42 +1,33 @@
 #include <curl/curl.h>
+
 #include <iostream>
 #include <string>
 
-static size_t write_cb(char* data, size_t size, size_t nmemb, void* userp) {
-    size_t n = size * nmemb;
-    static_cast<std::string*>(userp)->append(data, n);
-    return n;
-}
+#include "http_client.h"
+#include "probe.h"
 
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        std::cerr << "usage: netsplit <url>\n";
+    if (argc < 3 || std::string(argv[1]) != "probe") {
+        std::cerr << "usage: netsplit probe <url>\n";
         return 1;
     }
 
     curl_global_init(CURL_GLOBAL_DEFAULT);
-    CURL* h = curl_easy_init();
+    int exit_code = 0;
+    try {
+        HttpClient client;   // destroyed at the end of this try block
+        ProbeResult p = probe(client, argv[2]);
 
-    std::string body;
-    curl_easy_setopt(h, CURLOPT_URL, argv[1]);
-    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(h, CURLOPT_WRITEDATA, &body);
-
-    CURLcode rc = curl_easy_perform(h);
-    if (rc != CURLE_OK) {
-        std::cerr << "request failed: " << curl_easy_strerror(rc) << "\n";
-        curl_easy_cleanup(h);
-        curl_global_cleanup();
-        return 1;
+        std::cout << "File name:     " << p.filename << "\n";
+        std::cout << "Size:          "
+                  << (p.size >= 0 ? std::to_string(p.size) + " bytes" : "unknown")
+                  << "\n";
+        std::cout << "Range support: " << (p.ranges_supported ? "yes" : "no") << "\n";
+        std::cout << "ETag:          " << (p.etag.empty() ? "(none)" : p.etag) << "\n";
+    } catch (const std::exception& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        exit_code = 1;
     }
-
-    long status = 0;
-    curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &status);
-    std::cout << "HTTP status: " << status << "\n";
-    std::cout << "Body size:   " << body.size() << " bytes\n";
-
-    curl_easy_cleanup(h);
     curl_global_cleanup();
-    return 0;
+    return exit_code;
 }
