@@ -2,6 +2,7 @@
 #include <curl/curl.h>
 
 #include <cstddef>
+#include <functional>
 #include <limits>
 #include <map>
 #include <string>
@@ -15,18 +16,28 @@ struct Response {
 
 class HttpClient {
 public:
+    // Called for every piece of body data as it arrives.
+    // Return true to continue, false to stop the download.
+    using DataHandler = std::function<bool(const char* data, std::size_t len)>;
+
     HttpClient();
     ~HttpClient();
 
-    // RAII: one object owns one curl handle, so copying is not allowed.
     HttpClient(const HttpClient&) = delete;
     HttpClient& operator=(const HttpClient&) = delete;
 
-    // range example: "0-0". Empty string means no Range header.
+    // Collects the body in memory (used by probe).
     Response get(const std::string& url,
                  const std::string& range = "",
                  std::size_t max_body = std::numeric_limits<std::size_t>::max());
 
+    // Streams the body to on_data instead of memory (used for chunks).
+    Response get_stream(const std::string& url,
+                        const std::string& range,
+                        const DataHandler& on_data);
+
 private:
+    void prepare(const std::string& url, const std::string& range, Response& r);
+
     CURL* handle_;
 };
