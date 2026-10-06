@@ -38,3 +38,8 @@ void Storage::write_at(long long offset, const char* data, std::size_t len) {
         offset += n;
     }
 }
+void Storage::sync() {
+    if (::fsync(fd_) != 0)
+        throw std::runtime_error(std::string("fsync ") + path_ + ": " +
+                                 std::strerror(errno));
+}

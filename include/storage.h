@@ -13,6 +13,7 @@ public:
     Storage& operator=(const Storage&) = delete;
 
     void write_at(long long offset, const char* data, std::size_t len);
+    void sync();
     const std::string& path() const { return path_; }
 
 private:
