@@ -31,7 +31,7 @@ void print_usage() {
               << "  netsplit probe <url>\n"
               << "  netsplit plan <url>\n"
               << "  netsplit chunk <url> <index>\n"
-              << "  netsplit get <url> [--sha256 <expected>]\n";
+              << "  netsplit get <url> [--workers N] [--sha256 <expected>]\n";
 }
 
 ProbeResult probe_for_download(HttpClient& client, const std::string& url) {
@@ -165,11 +165,21 @@ int main(int argc, char** argv) {
             code = cmd_plan(client, url);
         } else if (cmd == "chunk" && argc >= 4) {
             code = cmd_chunk(client, url, std::stoi(argv[3]));
-        } else if (cmd == "get") {
+                } else if (cmd == "get") {
             std::string expected;
-            if (argc >= 5 && std::string(argv[3]) == "--sha256")
-                expected = argv[4];
-            code = cmd_get(client, url, expected, 4);   // fixed 4 workers for now
+            int num_workers = 4;   // default
+            for (int i = 3; i + 1 < argc; i += 2) {
+                std::string flag = argv[i];
+                if (flag == "--sha256")
+                    expected = argv[i + 1];
+                else if (flag == "--workers")
+                    num_workers = std::stoi(argv[i + 1]);
+                else
+                    throw std::runtime_error("unknown option " + flag);
+            }
+            if (num_workers < 1)
+                throw std::runtime_error("--workers must be at least 1");
+            code = cmd_get(client, url, expected, num_workers);
         } else {
             print_usage();
             code = 1;
