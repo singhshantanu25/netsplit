@@ -3,17 +3,24 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "hasher.h"
 #include "http_client.h"
 #include "planner.h"
 #include "probe.h"
+#include "progress.h"
 #include "storage.h"
+#include "work_queue.h"
+#include "worker.h"
 
 namespace {
 
@@ -27,55 +34,11 @@ void print_usage() {
               << "  netsplit get <url> [--sha256 <expected>]\n";
 }
 
-// One progress line that rewrites itself. "\r" moves back to the line start.
-class Progress {
-public:
-    explicit Progress(long long total) : total_(total) {}
-
-    void add(long long bytes) {
-        done_ += bytes;
-        int percent = static_cast<int>(done_ * 100 / total_);
-        if (percent != last_percent_) {
-            last_percent_ = percent;
-            std::cout << "\r" << done_ << " / " << total_ << " bytes ("
-                      << percent << "%)" << std::flush;
-        }
-    }
-    void finish() { std::cout << "\n"; }
-
-private:
-    long long total_;
-    long long done_ = 0;
-    int last_percent_ = -1;
-};
-
 ProbeResult probe_for_download(HttpClient& client, const std::string& url) {
     ProbeResult p = probe(client, url);
     if (!p.ranges_supported || p.size <= 0)
         throw std::runtime_error("server does not support ranges, cannot split");
     return p;
-}
-
-long long download_chunk(HttpClient& client, const std::string& url,
-                         const Chunk& c, Storage& out, Progress* progress) {
-    long long received = 0;
-    Response r = client.get_stream(url, c.range(),
-        [&](const char* data, std::size_t len) {
-            if (received + static_cast<long long>(len) > c.size()) return false;
-            out.write_at(c.start + received, data, len);
-            received += static_cast<long long>(len);
-            if (progress) progress->add(static_cast<long long>(len));
-            return true;
-        });
-
-    if (r.status != 206)
-        throw std::runtime_error("chunk " + std::to_string(c.index) +
-                                 ": expected HTTP 206, got " + std::to_string(r.status));
-    if (received != c.size())
-        throw std::runtime_error("chunk " + std::to_string(c.index) + ": got " +
-                                 std::to_string(received) + " bytes, expected " +
-                                 std::to_string(c.size()));
-    return received;
 }
 
 int cmd_probe(HttpClient& client, const std::string& url) {
@@ -113,8 +76,8 @@ int cmd_chunk(HttpClient& client, const std::string& url, int index) {
     return 0;
 }
 
-int cmd_get(HttpClient& client, const std::string& url, std::string expected) {
-    // People paste hashes in upper or lower case; compare in lower case.
+int cmd_get(HttpClient& client, const std::string& url, std::string expected,
+            int num_workers) {
     std::transform(expected.begin(), expected.end(), expected.begin(),
                    [](unsigned char ch) { return std::tolower(ch); });
 
@@ -122,22 +85,50 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected) {
     Planner plan(p.size, kChunkSize);
     const std::string final_path = p.filename;
     const std::string part_path = final_path + ".part";
+    const int n = std::min(num_workers, plan.count());   // no idle workers
 
     std::cout << "Downloading " << final_path << " (" << p.size << " bytes, "
-              << plan.count() << " chunks)\n";
+              << plan.count() << " chunks, " << n << " workers)\n";
 
     Storage out(part_path, p.size);
     Progress progress(p.size);
-    for (int i = 0; i < plan.count(); ++i)
-        download_chunk(client, url, plan.chunk(i), out, &progress);
-    progress.finish();
 
-    out.sync();   // data really on disk BEFORE hashing and renaming
+    // Producer: put every chunk in the queue, then close it.
+    WorkQueue queue;
+    for (int i = 0; i < plan.count(); ++i) queue.push(plan.chunk(i));
+    queue.close();
+
+    // Each worker owns its own HttpClient (curl handle).
+    // unique_ptr because a Worker can't be copied or moved.
+    std::vector<std::unique_ptr<Worker>> workers;
+    for (int i = 0; i < n; ++i)
+        workers.push_back(std::make_unique<Worker>(i, url, queue, out, progress));
+
+    // Consumers: one thread per worker.
+    auto start = std::chrono::steady_clock::now();
+    std::vector<std::thread> pool;
+    for (auto& w : workers)
+        pool.emplace_back([&w] { w->run(); });
+    for (auto& t : pool) t.join();   // wait for every thread
+    progress.finish();
+    double secs = std::chrono::duration<double>(
+                      std::chrono::steady_clock::now() - start).count();
+
+    // If any worker failed, report it (the file stays as .part).
+    for (auto& w : workers)
+        if (w->error()) std::rethrow_exception(w->error());
+
+    for (auto& w : workers)
+        std::cout << "  worker " << w->id() << ": " << w->chunks_done()
+                  << " chunks, " << w->bytes_done() << " bytes\n";
+    std::cout << "Time: " << secs << " s, average "
+              << (p.size / (1024.0 * 1024.0)) / secs << " MB/s\n";
+
+    out.sync();
 
     std::cout << "Verifying SHA-256...\n";
     std::string actual = sha256_file(part_path);
     std::cout << "SHA-256: " << actual << "\n";
-
     if (!expected.empty()) {
         if (actual != expected)
             throw std::runtime_error("SHA-256 mismatch! expected " + expected +
@@ -163,10 +154,11 @@ int main(int argc, char** argv) {
     std::string cmd = argv[1];
     std::string url = argv[2];
 
+    // Must happen once, before any thread starts using curl.
     curl_global_init(CURL_GLOBAL_DEFAULT);
     int code = 0;
     try {
-        HttpClient client;
+        HttpClient client;   // used by main for probe / plan / chunk
         if (cmd == "probe") {
             code = cmd_probe(client, url);
         } else if (cmd == "plan") {
@@ -177,7 +169,7 @@ int main(int argc, char** argv) {
             std::string expected;
             if (argc >= 5 && std::string(argv[3]) == "--sha256")
                 expected = argv[4];
-            code = cmd_get(client, url, expected);
+            code = cmd_get(client, url, expected, 4);   // fixed 4 workers for now
         } else {
             print_usage();
             code = 1;
