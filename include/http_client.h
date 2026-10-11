@@ -35,9 +35,16 @@ public:
     Response get_stream(const std::string& url,
                         const std::string& range,
                         const DataHandler& on_data);
+                            // false = open a fresh connection for every request (for comparison tests).
+    void set_reuse(bool reuse) { reuse_ = reuse; }
+
+    // Total number of NEW connections this client has opened so far.
+    long connections_opened() const { return connections_opened_; }
 
 private:
     void prepare(const std::string& url, const std::string& range, Response& r);
 
     CURL* handle_;
+        bool reuse_ = true;
+    long connections_opened_ = 0;
 };

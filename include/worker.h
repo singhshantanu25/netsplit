@@ -16,14 +16,15 @@ long long download_chunk(HttpClient& client, const std::string& url,
 // How a chunk is fetched (curl, Range, 206 check, pwrite) is hidden inside.
 class Worker {
 public:
-    Worker(int id, const std::string& url, WorkQueue& queue, Storage& out,
-           Progress& progress);
+   Worker(int id, const std::string& url, WorkQueue& queue, Storage& out,
+           Progress& progress, bool reuse);
 
     void run();   // call this on its own thread
 
     int id() const { return id_; }
     int chunks_done() const { return chunks_done_; }
     long long bytes_done() const { return bytes_done_; }
+    long connections_opened() const { return client_.connections_opened(); }
     std::exception_ptr error() const { return error_; }
 
 private:

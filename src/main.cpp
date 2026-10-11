@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
@@ -31,7 +32,7 @@ void print_usage() {
               << "  netsplit probe <url>\n"
               << "  netsplit plan <url>\n"
               << "  netsplit chunk <url> <index>\n"
-              << "  netsplit get <url> [--workers N] [--sha256 <expected>]\n";
+              << "  netsplit get <url> [--workers N] [--sha256 <expected>] [--no-reuse]\n";
 }
 
 ProbeResult probe_for_download(HttpClient& client, const std::string& url) {
@@ -77,7 +78,7 @@ int cmd_chunk(HttpClient& client, const std::string& url, int index) {
 }
 
 int cmd_get(HttpClient& client, const std::string& url, std::string expected,
-            int num_workers) {
+            int num_workers, bool reuse) {
     std::transform(expected.begin(), expected.end(), expected.begin(),
                    [](unsigned char ch) { return std::tolower(ch); });
 
@@ -88,10 +89,11 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
     const int n = std::min(num_workers, plan.count());   // no idle workers
 
     std::cout << "Downloading " << final_path << " (" << p.size << " bytes, "
-              << plan.count() << " chunks, " << n << " workers)\n";
+              << plan.count() << " chunks, " << n << " workers, connection reuse "
+              << (reuse ? "on" : "OFF") << ")\n";
 
     Storage out(part_path, p.size);
-        Progress progress(static_cast<std::uint64_t>(p.size));
+    Progress progress(static_cast<std::uint64_t>(p.size));
     progress.start();   // printer thread: one line per second
 
     // Producer: put every chunk in the queue, then close it.
@@ -100,30 +102,35 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
     queue.close();
 
     // Each worker owns its own HttpClient (curl handle).
-    // unique_ptr because a Worker can't be copied or moved.
     std::vector<std::unique_ptr<Worker>> workers;
     for (int i = 0; i < n; ++i)
-        workers.push_back(std::make_unique<Worker>(i, url, queue, out, progress));
+        workers.push_back(
+            std::make_unique<Worker>(i, url, queue, out, progress, reuse));
 
     // Consumers: one thread per worker.
     auto start = std::chrono::steady_clock::now();
     std::vector<std::thread> pool;
     for (auto& w : workers)
         pool.emplace_back([&w] { w->run(); });
-    for (auto& t : pool) t.join();   // wait for every thread
-        progress.stop();
+    for (auto& t : pool) t.join();
+    progress.stop();
     double secs = std::chrono::duration<double>(
                       std::chrono::steady_clock::now() - start).count();
 
-    // If any worker failed, report it (the file stays as .part).
     for (auto& w : workers)
         if (w->error()) std::rethrow_exception(w->error());
 
-    for (auto& w : workers)
+    long total_conns = 0;
+    for (auto& w : workers) {
         std::cout << "  worker " << w->id() << ": " << w->chunks_done()
-                  << " chunks, " << w->bytes_done() << " bytes\n";
+                  << " chunks, " << w->bytes_done() << " bytes, "
+                  << w->connections_opened() << " connection(s) opened\n";
+        total_conns += w->connections_opened();
+    }
     std::cout << "Time: " << secs << " s, average "
-              << (p.size / (1024.0 * 1024.0)) / secs << " MB/s\n";
+              << (p.size / (1024.0 * 1024.0)) / secs << " MB/s, "
+              << total_conns << " connections for " << plan.count()
+              << " chunks\n";
 
     out.sync();
 
@@ -166,21 +173,28 @@ int main(int argc, char** argv) {
             code = cmd_plan(client, url);
         } else if (cmd == "chunk" && argc >= 4) {
             code = cmd_chunk(client, url, std::stoi(argv[3]));
-                } else if (cmd == "get") {
+        } else if (cmd == "get") {
             std::string expected;
             int num_workers = 4;   // default
-            for (int i = 3; i + 1 < argc; i += 2) {
+            bool reuse = true;     // default
+            for (int i = 3; i < argc; ++i) {
                 std::string flag = argv[i];
-                if (flag == "--sha256")
-                    expected = argv[i + 1];
-                else if (flag == "--workers")
-                    num_workers = std::stoi(argv[i + 1]);
-                else
-                    throw std::runtime_error("unknown option " + flag);
+                if (flag == "--no-reuse") {
+                    reuse = false;                          // flag with no value
+                } else if ((flag == "--sha256" || flag == "--workers") &&
+                           i + 1 < argc) {
+                    std::string value = argv[++i];          // flag with a value
+                    if (flag == "--sha256")
+                        expected = value;
+                    else
+                        num_workers = std::stoi(value);
+                } else {
+                    throw std::runtime_error("unknown or incomplete option " + flag);
+                }
             }
             if (num_workers < 1)
                 throw std::runtime_error("--workers must be at least 1");
-            code = cmd_get(client, url, expected, num_workers);
+            code = cmd_get(client, url, expected, num_workers, reuse);
         } else {
             print_usage();
             code = 1;

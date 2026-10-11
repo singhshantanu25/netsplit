@@ -25,8 +25,10 @@ long long download_chunk(HttpClient& client, const std::string& url,
 }
 
 Worker::Worker(int id, const std::string& url, WorkQueue& queue, Storage& out,
-               Progress& progress)
-    : id_(id), url_(url), queue_(queue), out_(out), progress_(progress) {}
+               Progress& progress, bool reuse)
+    : id_(id), url_(url), queue_(queue), out_(out), progress_(progress) {
+    client_.set_reuse(reuse);
+}
 
 void Worker::run() {
     try {
