@@ -95,8 +95,12 @@ void HttpClient::prepare(const std::string& url, const std::string& range,
     curl_easy_setopt(handle_, CURLOPT_CONNECTTIMEOUT, 15L);
     curl_easy_setopt(handle_, CURLOPT_HEADERFUNCTION, header_cb);
     curl_easy_setopt(handle_, CURLOPT_HEADERDATA, &r.headers);
-    if (!range.empty())
+        if (!range.empty())
         curl_easy_setopt(handle_, CURLOPT_RANGE, range.c_str());
+    if (!reuse_) {
+        curl_easy_setopt(handle_, CURLOPT_FRESH_CONNECT, 1L);   // don't reuse an old one
+        curl_easy_setopt(handle_, CURLOPT_FORBID_REUSE, 1L);    // close after this request
+    }
 }
 
 Response HttpClient::get(const std::string& url, const std::string& range,
@@ -113,7 +117,10 @@ Response HttpClient::get(const std::string& url, const std::string& range,
         throw std::runtime_error(std::string("request failed: ") +
                                  curl_easy_strerror(rc));
 
-    curl_easy_getinfo(handle_, CURLINFO_RESPONSE_CODE, &r.status);
+       curl_easy_getinfo(handle_, CURLINFO_RESPONSE_CODE, &r.status);
+    long new_conns = 0;
+    curl_easy_getinfo(handle_, CURLINFO_NUM_CONNECTS, &new_conns);
+    connections_opened_ += new_conns;
     r.truncated = ctx.truncated;
     return r;
 }
@@ -136,5 +143,8 @@ Response HttpClient::get_stream(const std::string& url,
                                  curl_easy_strerror(rc));
 
     curl_easy_getinfo(handle_, CURLINFO_RESPONSE_CODE, &r.status);
+        long new_conns = 0;
+    curl_easy_getinfo(handle_, CURLINFO_NUM_CONNECTS, &new_conns);
+    connections_opened_ += new_conns;
     return r;
 }
