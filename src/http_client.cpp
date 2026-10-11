@@ -95,7 +95,7 @@ void HttpClient::prepare(const std::string& url, const std::string& range,
     curl_easy_setopt(handle_, CURLOPT_CONNECTTIMEOUT, 15L);
     curl_easy_setopt(handle_, CURLOPT_HEADERFUNCTION, header_cb);
     curl_easy_setopt(handle_, CURLOPT_HEADERDATA, &r.headers);
-        if (!range.empty())
+    if (!range.empty())
         curl_easy_setopt(handle_, CURLOPT_RANGE, range.c_str());
     if (!reuse_) {
         curl_easy_setopt(handle_, CURLOPT_FRESH_CONNECT, 1L);   // don't reuse an old one
