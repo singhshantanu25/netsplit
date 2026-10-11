@@ -1,31 +1,81 @@
 #pragma once
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <sstream>
+#include <thread>
 
-// Thread-safe progress line. Several workers call add() at the same time.
+// Live progress.
+// Workers only call add(): one atomic operation, no lock, very cheap.
+// A separate printer thread wakes up every second and prints MB done and speed.
 class Progress {
 public:
-    explicit Progress(long long total) : total_(total) {}
+    explicit Progress(std::uint64_t total) : total_(total) {}
+    ~Progress() { stop(); }   // RAII: never leave the printer thread running
 
-    void add(long long bytes) {
-        std::lock_guard<std::mutex> lock(m_);   // done_ is shared
-        done_ += bytes;
-        int percent = static_cast<int>(done_ * 100 / total_);
-        if (percent != last_percent_) {
-            last_percent_ = percent;
-            std::cout << "\r" << done_ << " / " << total_ << " bytes ("
-                      << percent << "%)" << std::flush;
+    Progress(const Progress&) = delete;
+    Progress& operator=(const Progress&) = delete;
+
+    void add(std::uint64_t bytes) { done_.fetch_add(bytes); }
+    std::uint64_t done() const { return done_.load(); }
+
+    void start() {
+        printer_ = std::thread([this] { print_loop(); });
+    }
+
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lock(m_);
+            stopping_ = true;
+        }
+        cv_.notify_all();   // wake the printer right away
+        if (printer_.joinable()) {
+            printer_.join();
+            std::cout << "\n";
         }
     }
 
-    void finish() {
-        std::lock_guard<std::mutex> lock(m_);
-        std::cout << "\n";
+private:
+    void print_loop() {
+        using clock = std::chrono::steady_clock;
+        auto last_time = clock::now();
+        std::uint64_t last_bytes = 0;
+
+        std::unique_lock<std::mutex> lock(m_);
+        while (true) {
+            // Sleep up to 1 second, but wake immediately if stop() is called.
+            bool stop_now = cv_.wait_for(lock, std::chrono::seconds(1),
+                                         [&] { return stopping_; });
+            auto now = clock::now();
+            std::uint64_t bytes = done_.load();
+            double secs = std::chrono::duration<double>(now - last_time).count();
+            double speed = secs > 0 ? (bytes - last_bytes) / secs / kMB : 0.0;
+            print_line(bytes, speed);
+            last_time = now;
+            last_bytes = bytes;
+            if (stop_now) break;
+        }
     }
 
-private:
-    std::mutex m_;
-    long long total_;
-    long long done_ = 0;
-    int last_percent_ = -1;
+    void print_line(std::uint64_t bytes, double speed) const {
+        int percent = total_ ? static_cast<int>(bytes * 100 / total_) : 100;
+        std::ostringstream line;
+        line << std::fixed << std::setprecision(1)
+             << "\r" << bytes / kMB << " / " << total_ / kMB << " MB ("
+             << percent << "%)  " << speed << " MB/s     ";
+        std::cout << line.str() << std::flush;
+    }
+
+    static constexpr double kMB = 1024.0 * 1024.0;
+
+    const std::uint64_t total_;
+    std::atomic<std::uint64_t> done_{0};   // shared by all workers
+    std::thread printer_;
+    std::mutex m_;                         // only for sleeping/waking the printer
+    std::condition_variable cv_;
+    bool stopping_ = false;
 };

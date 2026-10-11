@@ -91,7 +91,8 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
               << plan.count() << " chunks, " << n << " workers)\n";
 
     Storage out(part_path, p.size);
-    Progress progress(p.size);
+        Progress progress(static_cast<std::uint64_t>(p.size));
+    progress.start();   // printer thread: one line per second
 
     // Producer: put every chunk in the queue, then close it.
     WorkQueue queue;
@@ -110,7 +111,7 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
     for (auto& w : workers)
         pool.emplace_back([&w] { w->run(); });
     for (auto& t : pool) t.join();   // wait for every thread
-    progress.finish();
+        progress.stop();
     double secs = std::chrono::duration<double>(
                       std::chrono::steady_clock::now() - start).count();
 
