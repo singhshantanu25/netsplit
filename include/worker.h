@@ -8,16 +8,24 @@
 #include "storage.h"
 #include "work_queue.h"
 
-// Downloads one chunk and writes it at its offset. Throws on any problem.
+// What the probe told us about the file. Every chunk answer must agree with it.
+struct Expect {
+    long long total;    // full file size
+    std::string etag;   // empty = server sent no ETag
+};
+
+// Downloads one chunk and writes it at its offset.
+// Rejects wrong answers (status, Content-Range, length, ETag). Throws on any problem.
 long long download_chunk(HttpClient& client, const std::string& url,
-                         const Chunk& c, Storage& out, Progress* progress);
+                         const Chunk& c, Storage& out, Progress* progress,
+                         const Expect& expect);
 
 // One download worker. run() takes chunks from the queue until there are none.
-// How a chunk is fetched (curl, Range, 206 check, pwrite) is hidden inside.
+// How a chunk is fetched (curl, Range, checks, pwrite) is hidden inside.
 class Worker {
 public:
-   Worker(int id, const std::string& url, WorkQueue& queue, Storage& out,
-           Progress& progress, bool reuse);
+    Worker(int id, const std::string& url, const Expect& expect, WorkQueue& queue,
+           Storage& out, Progress& progress, bool reuse);
 
     void run();   // call this on its own thread
 
@@ -30,6 +38,7 @@ public:
 private:
     int id_;
     std::string url_;
+    Expect expect_;
     WorkQueue& queue_;      // shared by all workers
     Storage& out_;          // shared by all workers (pwrite at different offsets)
     Progress& progress_;    // shared by all workers

@@ -20,6 +20,11 @@ public:
     // Return true to continue, false to stop the download.
     using DataHandler = std::function<bool(const char* data, std::size_t len)>;
 
+    // Called once, after the headers arrive and BEFORE the first body byte.
+    // Throw from it to reject the response (nothing gets written).
+    using HeaderCheck =
+        std::function<void(long status, const std::map<std::string, std::string>& headers)>;
+
     HttpClient();
     ~HttpClient();
 
@@ -32,10 +37,13 @@ public:
                  std::size_t max_body = std::numeric_limits<std::size_t>::max());
 
     // Streams the body to on_data instead of memory (used for chunks).
+    // If on_data returns false, the transfer stops and r.truncated is true.
     Response get_stream(const std::string& url,
                         const std::string& range,
-                        const DataHandler& on_data);
-                            // false = open a fresh connection for every request (for comparison tests).
+                        const DataHandler& on_data,
+                        const HeaderCheck& on_headers = HeaderCheck());
+
+    // false = open a fresh connection for every request (for comparison tests).
     void set_reuse(bool reuse) { reuse_ = reuse; }
 
     // Total number of NEW connections this client has opened so far.
@@ -45,6 +53,6 @@ private:
     void prepare(const std::string& url, const std::string& range, Response& r);
 
     CURL* handle_;
-        bool reuse_ = true;
+    bool reuse_ = true;
     long connections_opened_ = 0;
 };

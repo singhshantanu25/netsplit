@@ -40,8 +40,12 @@ size_t write_cb(char* data, size_t size, size_t nmemb, void* userp) {
 
 // ---- body streamed to a handler (get_stream) ----
 struct StreamCtx {
+    CURL* handle;
     const HttpClient::DataHandler* handler;
-    bool stopped = false;
+    const HttpClient::HeaderCheck* check;
+    const std::map<std::string, std::string>* headers;
+    bool checked = false;   // header check already done?
+    bool stopped = false;   // handler asked us to stop
     std::exception_ptr error;
 };
 
@@ -49,6 +53,15 @@ size_t stream_cb(char* data, size_t size, size_t nmemb, void* userp) {
     size_t n = size * nmemb;
     auto* ctx = static_cast<StreamCtx*>(userp);
     try {
+        // First body bytes: all headers are in, so check them before writing.
+        if (!ctx->checked) {
+            ctx->checked = true;
+            if (*ctx->check) {
+                long status = 0;
+                curl_easy_getinfo(ctx->handle, CURLINFO_RESPONSE_CODE, &status);
+                (*ctx->check)(status, *ctx->headers);
+            }
+        }
         if ((*ctx->handler)(data, n)) return n;
         ctx->stopped = true;
     } catch (...) {
@@ -117,7 +130,7 @@ Response HttpClient::get(const std::string& url, const std::string& range,
         throw std::runtime_error(std::string("request failed: ") +
                                  curl_easy_strerror(rc));
 
-       curl_easy_getinfo(handle_, CURLINFO_RESPONSE_CODE, &r.status);
+    curl_easy_getinfo(handle_, CURLINFO_RESPONSE_CODE, &r.status);
     long new_conns = 0;
     curl_easy_getinfo(handle_, CURLINFO_NUM_CONNECTS, &new_conns);
     connections_opened_ += new_conns;
@@ -127,24 +140,27 @@ Response HttpClient::get(const std::string& url, const std::string& range,
 
 Response HttpClient::get_stream(const std::string& url,
                                 const std::string& range,
-                                const DataHandler& on_data) {
+                                const DataHandler& on_data,
+                                const HeaderCheck& on_headers) {
     Response r;
-    StreamCtx ctx{&on_data};
+    StreamCtx ctx{handle_, &on_data, &on_headers, &r.headers};
     prepare(url, range, r);
     curl_easy_setopt(handle_, CURLOPT_WRITEFUNCTION, stream_cb);
     curl_easy_setopt(handle_, CURLOPT_WRITEDATA, &ctx);   // the "user pointer"
 
     CURLcode rc = curl_easy_perform(handle_);
-    if (ctx.error) std::rethrow_exception(ctx.error);
-    if (ctx.stopped)
-        throw std::runtime_error("download stopped: received more data than expected");
-    if (rc != CURLE_OK)
+
+    long new_conns = 0;
+    curl_easy_getinfo(handle_, CURLINFO_NUM_CONNECTS, &new_conns);
+    connections_opened_ += new_conns;
+
+    if (ctx.error) std::rethrow_exception(ctx.error);   // header check or write failed
+    bool stopped_by_us = (rc == CURLE_WRITE_ERROR && ctx.stopped);
+    if (rc != CURLE_OK && !stopped_by_us)
         throw std::runtime_error(std::string("request failed: ") +
                                  curl_easy_strerror(rc));
 
     curl_easy_getinfo(handle_, CURLINFO_RESPONSE_CODE, &r.status);
-        long new_conns = 0;
-    curl_easy_getinfo(handle_, CURLINFO_NUM_CONNECTS, &new_conns);
-    connections_opened_ += new_conns;
+    r.truncated = ctx.stopped;   // the caller decides if that is an error
     return r;
 }

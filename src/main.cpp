@@ -71,7 +71,7 @@ int cmd_chunk(HttpClient& client, const std::string& url, int index) {
     Planner plan(p.size, kChunkSize);
     const Chunk& c = plan.chunk(index);
         Storage out(p.filename, p.size);
-    long long got = download_chunk(client, url, c, out, nullptr);
+        long long got = download_chunk(client, url, c, out, nullptr, Expect{p.size, p.etag});
     std::cout << "chunk " << c.index << " (" << c.range() << ") -> " << out.path()
               << " at offset " << c.start << ", " << got << " bytes\n";
     return 0;
@@ -91,8 +91,7 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
     std::cout << "Downloading " << final_path << " (" << p.size << " bytes, "
               << plan.count() << " chunks, " << n << " workers, connection reuse "
               << (reuse ? "on" : "OFF") << ")\n";
-
-            
+  
         Storage out(final_path, p.size);
     Progress progress(static_cast<std::uint64_t>(p.size));
     progress.start();   // printer thread: one line per second
@@ -106,7 +105,7 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
     std::vector<std::unique_ptr<Worker>> workers;
     for (int i = 0; i < n; ++i)
         workers.push_back(
-            std::make_unique<Worker>(i, url, queue, out, progress, reuse));
+                        std::make_unique<Worker>(i, url, Expect{p.size, p.etag}, queue, out, progress, reuse));
 
     // Consumers: one thread per worker.
     auto start = std::chrono::steady_clock::now();
