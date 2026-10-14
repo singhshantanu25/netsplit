@@ -2,21 +2,26 @@
 #include <cstddef>
 #include <string>
 
-// Owns one open file (RAII on a file descriptor).
-// Opens the file once and writes bytes at any offset with pwrite.
+// Owns the staging file "<final>.part" (RAII on a file descriptor).
+// All data goes into the .part file; finalize() gives it the final name.
 class Storage {
 public:
-    Storage(const std::string& path, long long size);
+    Storage(const std::string& final_path, long long size);
     ~Storage();
 
     Storage(const Storage&) = delete;
     Storage& operator=(const Storage&) = delete;
 
     void write_at(long long offset, const char* data, std::size_t len);
-    void sync();
-    const std::string& path() const { return path_; }
+    void sync();       // fsync: wait until the data is really on disk
+    void finalize();   // fsync, atomic rename .part -> final name, fsync the folder
+
+    const std::string& path() const { return part_path_; }   // the staging file
+    const std::string& final_path() const { return final_path_; }
 
 private:
     int fd_;
-    std::string path_;
+    std::string final_path_;
+    std::string part_path_;
+    bool finalized_ = false;
 };

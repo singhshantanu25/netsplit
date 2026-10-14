@@ -70,7 +70,7 @@ int cmd_chunk(HttpClient& client, const std::string& url, int index) {
     ProbeResult p = probe_for_download(client, url);
     Planner plan(p.size, kChunkSize);
     const Chunk& c = plan.chunk(index);
-    Storage out(p.filename + ".part", p.size);
+        Storage out(p.filename, p.size);
     long long got = download_chunk(client, url, c, out, nullptr);
     std::cout << "chunk " << c.index << " (" << c.range() << ") -> " << out.path()
               << " at offset " << c.start << ", " << got << " bytes\n";
@@ -92,7 +92,8 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
               << plan.count() << " chunks, " << n << " workers, connection reuse "
               << (reuse ? "on" : "OFF") << ")\n";
 
-    Storage out(part_path, p.size);
+            
+        Storage out(final_path, p.size);
     Progress progress(static_cast<std::uint64_t>(p.size));
     progress.start();   // printer thread: one line per second
 
@@ -144,9 +145,7 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
         std::cout << "SHA-256 matches the expected value.\n";
     }
 
-    if (std::rename(part_path.c_str(), final_path.c_str()) != 0)
-        throw std::runtime_error("rename " + part_path + " -> " + final_path +
-                                 ": " + std::strerror(errno));
+        out.finalize();   // fsync + atomic rename + fsync the folder
 
     std::cout << "Saved " << final_path << "\n";
     return 0;
