@@ -120,17 +120,20 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
     for (auto& w : workers)
         if (w->error()) std::rethrow_exception(w->error());
 
-    long total_conns = 0;
+        long total_conns = 0;
+    int total_retries = 0;
     for (auto& w : workers) {
         std::cout << "  worker " << w->id() << ": " << w->chunks_done()
                   << " chunks, " << w->bytes_done() << " bytes, "
-                  << w->connections_opened() << " connection(s) opened\n";
+                  << w->connections_opened() << " connection(s) opened, "
+                  << w->retries() << " retries\n";
         total_conns += w->connections_opened();
+        total_retries += w->retries();
     }
     std::cout << "Time: " << secs << " s, average "
               << (p.size / (1024.0 * 1024.0)) / secs << " MB/s, "
               << total_conns << " connections for " << plan.count()
-              << " chunks\n";
+              << " chunks, " << total_retries << " retries\n";
 
     out.sync();
 

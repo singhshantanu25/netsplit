@@ -21,6 +21,7 @@ public:
     Progress& operator=(const Progress&) = delete;
 
     void add(std::uint64_t bytes) { done_.fetch_add(bytes); }
+    void sub(std::uint64_t bytes) { done_.fetch_sub(bytes); }  
     std::uint64_t done() const { return done_.load(); }
 
     void start() {

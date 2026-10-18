@@ -3,8 +3,16 @@
 #include "errors.h"
 
 #include <algorithm>
+#include <chrono>
+#include <iostream>
+#include <map>
+#include <mutex>
+#include <random>
+#include <stdexcept>
 
 namespace {
+
+constexpr int kMaxBadResponses = 5;   // wrong server answers before we give up
 
 using Headers = std::map<std::string, std::string>;
 
@@ -33,7 +41,7 @@ void check_response(const Chunk& c, const Expect& expect, long status,
         std::string got = (et == h.end()) ? "(none)" : et->second;
         if (got != expect.etag)
             throw BadResponse(who + ": file changed on the server (ETag " +
-                                     expect.etag + " -> " + got + ")");
+                              expect.etag + " -> " + got + ")");
     }
 
     // 2. Status. 200 = Range ignored, the body starts at byte 0.
@@ -45,7 +53,7 @@ void check_response(const Chunk& c, const Expect& expect, long status,
     }
     if (status != 206)
         throw BadResponse(who + ": expected HTTP 206, got " +
-                                 std::to_string(status));
+                          std::to_string(status));
 
     // 3. Content-Range must be exactly "bytes START-END/TOTAL".
     auto cr = h.find("content-range");
@@ -69,7 +77,25 @@ void check_response(const Chunk& c, const Expect& expect, long status,
     auto cl = h.find("content-length");
     if (cl != h.end() && to_ll(cl->second) != c.size())
         throw BadResponse(who + ": Content-Length " + cl->second +
-                                 ", expected " + std::to_string(c.size()));
+                          ", expected " + std::to_string(c.size()));
+}
+
+// Wait time before the next try. failures = 1, 2, 3, ...
+// Base: 1 s, 2 s, 4 s, 8 s, then 15 s max. Plus random jitter of up to half,
+// so workers that failed together do not all retry at the same moment.
+std::chrono::milliseconds backoff(int failures) {
+    int shift = std::min(failures - 1, 4);              // never shift too far
+    long long base = std::min(1000LL << shift, 15000LL);
+    thread_local std::mt19937 rng{std::random_device{}()};   // one per thread, no lock
+    std::uniform_int_distribution<long long> jitter(0, base / 2);
+    return std::chrono::milliseconds(base + jitter(rng));
+}
+
+// Several workers print at once, so one line at a time.
+std::mutex log_mutex;
+void log_line(const std::string& line) {
+    std::lock_guard<std::mutex> lock(log_mutex);
+    std::cerr << "\n" << line << "\n";
 }
 
 }  // namespace
@@ -93,18 +119,27 @@ long long download_chunk(HttpClient& client, const std::string& url,
         return take == static_cast<long long>(len);   // false = more than asked
     };
 
-    Response r = client.get_stream(url, c.range(), on_data, on_headers);
+    try {
+        Response r = client.get_stream(url, c.range(), on_data, on_headers);
 
-    // Again after the transfer: covers answers with an empty body,
-    // where the header check never ran.
-    check_response(c, expect, r.status, r.headers);
+        // Again after the transfer: covers answers with an empty body,
+        // where the header check never ran.
+        check_response(c, expect, r.status, r.headers);
 
-    if (r.truncated && r.status == 206)
-        throw BadResponse(chunk_name(c) + ": server sent more bytes than asked");
-    if (received != c.size())
-        throw BadResponse(chunk_name(c) + ": got " + std::to_string(received) +
-                                 " bytes, expected " + std::to_string(c.size()));
-    return received;
+        if (r.truncated && r.status == 206)
+            throw BadResponse(chunk_name(c) + ": server sent more bytes than asked");
+        if (received != c.size())
+            throw BadResponse(chunk_name(c) + ": got " + std::to_string(received) +
+                              " bytes, expected " + std::to_string(c.size()));
+        return received;
+    } catch (const ConnectionFailed& e) {
+        // The retry will download this chunk again, so do not count it twice.
+        if (progress) progress->sub(static_cast<std::uint64_t>(received));
+        throw ConnectionFailed(chunk_name(c) + ": " + e.what());   // add the chunk name
+    } catch (...) {
+        if (progress) progress->sub(static_cast<std::uint64_t>(received));
+        throw;
+    }
 }
 
 Worker::Worker(int id, const std::string& url, const Expect& expect, WorkQueue& queue,
@@ -116,9 +151,33 @@ Worker::Worker(int id, const std::string& url, const Expect& expect, WorkQueue& 
 
 void Worker::run() {
     try {
-        while (auto c = queue_.pop()) {   // stops when pop() returns nothing
-            bytes_done_ += download_chunk(client_, url_, *c, out_, &progress_, expect_);
-            ++chunks_done_;
+        while (auto job = queue_.pop()) {   // stops when there is nothing left
+            std::string why;
+            try {
+                bytes_done_ += download_chunk(client_, url_, job->chunk, out_,
+                                              &progress_, expect_);
+                ++chunks_done_;
+                queue_.done();
+                continue;
+            } catch (const ConnectionFailed& e) {
+                why = e.what();   // network problem: it usually comes back, keep trying
+            } catch (const BadResponse& e) {
+                if (++job->bad_responses >= kMaxBadResponses)
+                    throw BadResponse(std::string(e.what()) + " (gave up after " +
+                                      std::to_string(kMaxBadResponses) + " tries)");
+                why = e.what();
+            }
+            // Anything else (disk full, ...) is not caught here: it ends the download.
+
+            ++job->failures;
+            ++retries_;
+            auto delay = backoff(job->failures);
+            log_line("  [worker " + std::to_string(id_) + "] " + why + " -> retry " +
+                     std::to_string(job->failures) + " in " +
+                     std::to_string(delay.count() / 1000.0).substr(0, 4) + " s");
+
+            if (!queue_.wait_unless_cancelled(delay)) break;   // another worker gave up
+            queue_.retry(*job);   // back in the queue: any worker can take it
         }
     } catch (...) {
         // An exception must never escape a thread (that calls std::terminate).
