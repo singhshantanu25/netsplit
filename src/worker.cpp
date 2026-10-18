@@ -1,8 +1,8 @@
 #include "worker.h"
 
+#include "errors.h"
+
 #include <algorithm>
-#include <map>
-#include <stdexcept>
 
 namespace {
 
@@ -32,7 +32,7 @@ void check_response(const Chunk& c, const Expect& expect, long status,
         auto et = h.find("etag");
         std::string got = (et == h.end()) ? "(none)" : et->second;
         if (got != expect.etag)
-            throw std::runtime_error(who + ": file changed on the server (ETag " +
+            throw BadResponse(who + ": file changed on the server (ETag " +
                                      expect.etag + " -> " + got + ")");
     }
 
@@ -40,35 +40,35 @@ void check_response(const Chunk& c, const Expect& expect, long status,
     //    That is only usable for a chunk that starts at 0.
     if (status == 200) {
         if (c.start != 0)
-            throw std::runtime_error(who + ": server ignored Range (HTTP 200)");
+            throw BadResponse(who + ": server ignored Range (HTTP 200)");
         return;   // we keep only the first c.size() bytes and stop
     }
     if (status != 206)
-        throw std::runtime_error(who + ": expected HTTP 206, got " +
+        throw BadResponse(who + ": expected HTTP 206, got " +
                                  std::to_string(status));
 
     // 3. Content-Range must be exactly "bytes START-END/TOTAL".
     auto cr = h.find("content-range");
     if (cr == h.end())
-        throw std::runtime_error(who + ": 206 without Content-Range");
+        throw BadResponse(who + ": 206 without Content-Range");
     const std::string& v = cr->second;
     size_t dash = v.find('-');
     size_t slash = v.find('/');
     if (v.rfind("bytes ", 0) != 0 || dash == std::string::npos ||
         slash == std::string::npos || dash > slash)
-        throw std::runtime_error(who + ": bad Content-Range '" + v + "'");
+        throw BadResponse(who + ": bad Content-Range '" + v + "'");
     long long s = to_ll(v.substr(6, dash - 6));
     long long e = to_ll(v.substr(dash + 1, slash - dash - 1));
     std::string total = v.substr(slash + 1);
     if (s != c.start || e != c.end)
-        throw std::runtime_error(who + ": server sent '" + v + "'");
+        throw BadResponse(who + ": server sent '" + v + "'");
     if (total != "*" && to_ll(total) != expect.total)
-        throw std::runtime_error(who + ": file size changed ('" + v + "')");
+        throw BadResponse(who + ": file size changed ('" + v + "')");
 
     // 4. Content-Length, if sent, must be the chunk size.
     auto cl = h.find("content-length");
     if (cl != h.end() && to_ll(cl->second) != c.size())
-        throw std::runtime_error(who + ": Content-Length " + cl->second +
+        throw BadResponse(who + ": Content-Length " + cl->second +
                                  ", expected " + std::to_string(c.size()));
 }
 
@@ -100,9 +100,9 @@ long long download_chunk(HttpClient& client, const std::string& url,
     check_response(c, expect, r.status, r.headers);
 
     if (r.truncated && r.status == 206)
-        throw std::runtime_error(chunk_name(c) + ": server sent more bytes than asked");
+        throw BadResponse(chunk_name(c) + ": server sent more bytes than asked");
     if (received != c.size())
-        throw std::runtime_error(chunk_name(c) + ": got " + std::to_string(received) +
+        throw BadResponse(chunk_name(c) + ": got " + std::to_string(received) +
                                  " bytes, expected " + std::to_string(c.size()));
     return received;
 }

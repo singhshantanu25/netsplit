@@ -1,7 +1,8 @@
 #include "probe.h"
 
+#include "errors.h"
+
 #include <algorithm>
-#include <stdexcept>
 
 namespace {
 
@@ -41,7 +42,7 @@ ProbeResult probe(HttpClient& client, const std::string& url) {
     Response r = client.get(url, "0-0", 1024);   // never read more than 1 KiB
 
     if (r.status != 200 && r.status != 206)
-        throw std::runtime_error("server returned HTTP " +
+                throw BadResponse("server returned HTTP " +
                                  std::to_string(r.status));
 
     ProbeResult p;

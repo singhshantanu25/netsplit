@@ -1,10 +1,8 @@
 #include "http_client.h"
 
-#include <algorithm>
-#include <cctype>
-#include <exception>
-#include <stdexcept>
+#include "errors.h"
 
+#include <algorithm>
 namespace {
 
 std::string to_lower(std::string s) {
@@ -127,7 +125,7 @@ Response HttpClient::get(const std::string& url, const std::string& range,
     CURLcode rc = curl_easy_perform(handle_);
     bool stopped_by_us = (rc == CURLE_WRITE_ERROR && ctx.truncated);
     if (rc != CURLE_OK && !stopped_by_us)
-        throw std::runtime_error(std::string("request failed: ") +
+                throw ConnectionFailed(std::string("request failed: ") + 
                                  curl_easy_strerror(rc));
 
     curl_easy_getinfo(handle_, CURLINFO_RESPONSE_CODE, &r.status);
@@ -157,7 +155,7 @@ Response HttpClient::get_stream(const std::string& url,
     if (ctx.error) std::rethrow_exception(ctx.error);   // header check or write failed
     bool stopped_by_us = (rc == CURLE_WRITE_ERROR && ctx.stopped);
     if (rc != CURLE_OK && !stopped_by_us)
-        throw std::runtime_error(std::string("request failed: ") +
+                throw ConnectionFailed(std::string("request failed: ") +
                                  curl_easy_strerror(rc));
 
     curl_easy_getinfo(handle_, CURLINFO_RESPONSE_CODE, &r.status);
