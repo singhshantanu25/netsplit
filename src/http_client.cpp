@@ -104,6 +104,12 @@ void HttpClient::prepare(const std::string& url, const std::string& range,
     curl_easy_setopt(handle_, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(handle_, CURLOPT_USERAGENT, "netsplit/0.1");
     curl_easy_setopt(handle_, CURLOPT_CONNECTTIMEOUT, 15L);
+        curl_easy_setopt(handle_, CURLOPT_CONNECTTIMEOUT, 15L);
+    // Stall detection: under 1 KB/s for 20 s in a row -> curl aborts with
+    // CURLE_OPERATION_TIMEDOUT, which we throw as ConnectionFailed (retried).
+    // No total time limit: a slow but moving download is fine.
+    curl_easy_setopt(handle_, CURLOPT_LOW_SPEED_LIMIT, 1024L);   // bytes per second
+    curl_easy_setopt(handle_, CURLOPT_LOW_SPEED_TIME, 20L);      // seconds
     curl_easy_setopt(handle_, CURLOPT_HEADERFUNCTION, header_cb);
     curl_easy_setopt(handle_, CURLOPT_HEADERDATA, &r.headers);
     if (!range.empty())
