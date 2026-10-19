@@ -14,7 +14,9 @@
 // A separate printer thread wakes up every second and prints MB done and speed.
 class Progress {
 public:
-    explicit Progress(std::uint64_t total) : total_(total) {}
+    // already = bytes finished in an earlier run (when resuming).
+    explicit Progress(std::uint64_t total, std::uint64_t already = 0)
+        : total_(total), done_(already) {}
     ~Progress() { stop(); }   // RAII: never leave the printer thread running
 
     Progress(const Progress&) = delete;
@@ -44,7 +46,7 @@ private:
     void print_loop() {
         using clock = std::chrono::steady_clock;
         auto last_time = clock::now();
-        std::uint64_t last_bytes = 0;
+        std::uint64_t last_bytes = done_.load();   // speed counts only new bytes
 
         std::unique_lock<std::mutex> lock(m_);
         while (true) {

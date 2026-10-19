@@ -1,4 +1,5 @@
 #include <curl/curl.h>
+#include <sys/stat.h>
 
 #include <algorithm>
 #include <atomic>
@@ -10,6 +11,7 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -29,6 +31,12 @@
 namespace {
 
 constexpr long long kChunkSize = 4LL * 1024 * 1024;   // 4 MB
+
+// True if the file exists and has exactly this size.
+bool file_has_size(const std::string& path, long long size) {
+    struct stat st;
+    return ::stat(path.c_str(), &st) == 0 && st.st_size == size;
+}
 
 void print_usage() {
     std::cerr << "usage:\n"
@@ -89,25 +97,52 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
     Planner plan(p.size, kChunkSize);
     const std::string final_path = p.filename;
     const std::string part_path = final_path + ".part";
-    const int n = std::min(num_workers, plan.count());   // no idle workers
+    const std::string state_path = final_path + ".progress.json";
 
+    // Start fresh, or continue an earlier run if it is for the SAME file.
+    ResumeState start_state{url, p.size, p.etag, kChunkSize,
+                            std::vector<bool>(static_cast<std::size_t>(plan.count()), false)};
+    if (std::optional<ResumeState> old = load_state(state_path)) {
+        bool same = old->url == url && old->size == p.size && old->etag == p.etag &&
+                    old->chunk_size == kChunkSize &&
+                    static_cast<int>(old->done.size()) == plan.count() &&
+                    file_has_size(part_path, p.size);
+        if (same)
+            start_state = *old;
+        else
+            std::cout << "Found " << state_path << ", but the file on the server "
+                      << "changed (or the .part is missing): starting over.\n";
+    }
+
+    int already_chunks = 0;
+    long long already_bytes = 0;
+    for (int i = 0; i < plan.count(); ++i) {
+        if (start_state.done[static_cast<std::size_t>(i)]) {
+            ++already_chunks;
+            already_bytes += plan.chunk(i).size();
+        }
+    }
+    const int remaining = plan.count() - already_chunks;
+    const int n = std::min(num_workers, remaining);   // no idle workers
+
+    if (already_chunks > 0)
+        std::cout << "Resuming: " << already_chunks << " of " << plan.count()
+                  << " chunks already done (" << already_bytes << " bytes)\n";
     std::cout << "Downloading " << final_path << " (" << p.size << " bytes, "
               << plan.count() << " chunks, " << n << " workers, connection reuse "
               << (reuse ? "on" : "OFF") << ")\n";
 
-    Storage out(final_path, p.size);
+    Storage out(final_path, p.size);   // keeps the existing .part data
+    StateFile state(state_path, start_state);
 
-    // Which chunks are on disk, saved to "<name>.progress.json" as we go.
-    ResumeState fresh{url, p.size, p.etag, kChunkSize,
-                      std::vector<bool>(static_cast<std::size_t>(plan.count()), false)};
-    StateFile state(final_path + ".progress.json", fresh);
-
-    Progress progress(static_cast<std::uint64_t>(p.size));
+    Progress progress(static_cast<std::uint64_t>(p.size),
+                      static_cast<std::uint64_t>(already_bytes));
     progress.start();   // printer thread: one line per second
 
-    // Producer: put every chunk in the queue, then close it.
+    // Producer: only the chunks that are not done yet.
     WorkQueue queue;
-    for (int i = 0; i < plan.count(); ++i) queue.push(plan.chunk(i));
+    for (int i = 0; i < plan.count(); ++i)
+        if (!start_state.done[static_cast<std::size_t>(i)]) queue.push(plan.chunk(i));
     queue.close();
 
     // Each worker owns its own HttpClient (curl handle).
@@ -151,6 +186,7 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
 
     long total_conns = 0;
     int total_retries = 0;
+    long long new_bytes = 0;   // downloaded in THIS run
     for (auto& w : workers) {
         std::cout << "  worker " << w->id() << ": " << w->chunks_done()
                   << " chunks, " << w->bytes_done() << " bytes, "
@@ -158,10 +194,11 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
                   << w->retries() << " retries\n";
         total_conns += w->connections_opened();
         total_retries += w->retries();
+        new_bytes += w->bytes_done();
     }
     std::cout << "Time: " << secs << " s, average "
-              << (p.size / (1024.0 * 1024.0)) / secs << " MB/s, "
-              << total_conns << " connections for " << plan.count()
+              << (new_bytes / (1024.0 * 1024.0)) / secs << " MB/s, "
+              << total_conns << " connections for " << remaining
               << " chunks, " << total_retries << " retries\n";
 
     state.save(out);   // all chunks done (also fsyncs the data)
