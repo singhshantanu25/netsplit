@@ -19,6 +19,7 @@
 
 #include "hasher.h"
 #include "http_client.h"
+#include "network.h"
 #include "planner.h"
 #include "probe.h"
 #include "progress.h"
@@ -40,6 +41,7 @@ bool file_has_size(const std::string& path, long long size) {
 
 void print_usage() {
     std::cerr << "usage:\n"
+              << "  netsplit interfaces\n"
               << "  netsplit probe <url>\n"
               << "  netsplit plan <url>\n"
               << "  netsplit chunk <url> <index>\n"
@@ -51,6 +53,21 @@ ProbeResult probe_for_download(HttpClient& client, const std::string& url) {
     if (!p.ranges_supported || p.size <= 0)
         throw std::runtime_error("server does not support ranges, cannot split");
     return p;
+}
+
+int cmd_interfaces() {
+    std::vector<NetInterface> all = list_interfaces();
+    if (all.empty()) {
+        std::cout << "No network interface with an IPv4 address.\n";
+        return 1;
+    }
+    std::cout << "Interfaces with an IPv4 address:\n";
+    for (const auto& n : all) {
+        std::printf("  %-8s %-16s %-4s %s\n", n.name.c_str(), n.ipv4.c_str(),
+                    n.up ? "up" : "DOWN", n.kind.c_str());
+    }
+    std::cout << "Use a name with --interfaces, e.g. --interfaces " << all.front().name << "\n";
+    return 0;
 }
 
 int cmd_probe(HttpClient& client, const std::string& url) {
@@ -223,6 +240,14 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (argc >= 2 && std::string(argv[1]) == "interfaces") {
+        try {
+            return cmd_interfaces();   // needs no URL
+        } catch (const std::exception& e) {
+            std::cerr << "error: " << e.what() << "\n";
+            return 1;
+        }
+    }
     if (argc < 3) {
         print_usage();
         return 1;
