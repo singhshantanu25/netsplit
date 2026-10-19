@@ -145,10 +145,12 @@ long long download_chunk(HttpClient& client, const std::string& url,
 }
 
 Worker::Worker(int id, const std::string& url, const Expect& expect, WorkQueue& queue,
-               Storage& out, Progress& progress, StateFile& state, bool reuse)
+               Storage& out, Progress& progress, StateFile& state, bool reuse,
+               const std::string& iface)
     : id_(id), url_(url), expect_(expect), queue_(queue), out_(out),
       progress_(progress), state_(state) {
     client_.set_reuse(reuse);
+    client_.set_interface(iface);   // this worker's network
 }
 
 void Worker::run() {

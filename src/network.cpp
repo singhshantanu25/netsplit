@@ -74,6 +74,12 @@ std::vector<NetInterface> list_interfaces() {
         n.kind = (it != ports.end()) ? it->second : guess_kind(n.name, n.ipv4);
         if (n.ipv4.rfind("172.20.10.", 0) == 0 && it != ports.end())
             n.kind += " (phone hotspot)";
+        if (n.ipv4.rfind("169.254.", 0) == 0) {
+            // Self-assigned: nobody gave this interface an address (no DHCP),
+            // so it is not connected to any network.
+            n.kind += " (link-local, no network)";
+            n.up = false;
+        }
         result.push_back(n);
     }
     return result;

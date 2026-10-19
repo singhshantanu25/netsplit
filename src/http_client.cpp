@@ -3,6 +3,10 @@
 #include "errors.h"
 #include "stop.h"
 
+#include <net/if.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+
 #include <algorithm>
 #include <cctype>
 #include <exception>
@@ -82,6 +86,24 @@ int xferinfo_cb(void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
     return stop_requested() ? 1 : 0;   // non-zero = abort the transfer
 }
 
+// ---- interface binding ----
+// curl calls this right after it creates each socket, before connect().
+// CURLOPT_INTERFACE alone only sets the SOURCE address; on macOS the packets
+// could still leave through the default route (Wi-Fi). IP_BOUND_IF scopes the
+// socket to the interface, so it really uses that network.
+int sockopt_cb(void* clientp, curl_socket_t fd, curlsocktype purpose) {
+    if (purpose != CURLSOCKTYPE_IPCXN) return CURL_SOCKOPT_OK;
+    unsigned int index = *static_cast<unsigned int*>(clientp);
+    if (index == 0) return CURL_SOCKOPT_OK;
+#ifdef IP_BOUND_IF
+    if (setsockopt(fd, IPPROTO_IP, IP_BOUND_IF, &index, sizeof(index)) != 0)
+        return CURL_SOCKOPT_ERROR;
+#else
+    (void)fd;   // Linux: CURLOPT_INTERFACE uses SO_BINDTODEVICE when allowed
+#endif
+    return CURL_SOCKOPT_OK;
+}
+
 // ---- headers ----
 size_t header_cb(char* data, size_t size, size_t nmemb, void* userp) {
     size_t n = size * nmemb;
@@ -108,6 +130,16 @@ HttpClient::~HttpClient() {
     curl_easy_cleanup(handle_);
 }
 
+void HttpClient::set_interface(const std::string& name) {
+    iface_ = name;
+    iface_index_ = 0;
+    if (!name.empty()) {
+        iface_index_ = if_nametoindex(name.c_str());
+        if (iface_index_ == 0)
+            throw std::runtime_error("unknown network interface '" + name + "'");
+    }
+}
+
 // Options shared by get() and get_stream().
 void HttpClient::prepare(const std::string& url, const std::string& range,
                          Response& r) {
@@ -127,6 +159,14 @@ void HttpClient::prepare(const std::string& url, const std::string& range,
     curl_easy_setopt(handle_, CURLOPT_HEADERDATA, &r.headers);
     if (!range.empty())
         curl_easy_setopt(handle_, CURLOPT_RANGE, range.c_str());
+    if (!iface_.empty()) {
+        // "if!" = use exactly this interface, never fall back to another one.
+        const std::string spec = "if!" + iface_;
+        curl_easy_setopt(handle_, CURLOPT_INTERFACE, spec.c_str());   // curl copies it
+        curl_easy_setopt(handle_, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);   // we bind IPv4
+        curl_easy_setopt(handle_, CURLOPT_SOCKOPTFUNCTION, sockopt_cb);
+        curl_easy_setopt(handle_, CURLOPT_SOCKOPTDATA, &iface_index_);
+    }
     if (!reuse_) {
         curl_easy_setopt(handle_, CURLOPT_FRESH_CONNECT, 1L);   // don't reuse an old one
         curl_easy_setopt(handle_, CURLOPT_FORBID_REUSE, 1L);    // close after this request

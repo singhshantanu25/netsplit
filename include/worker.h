@@ -27,7 +27,8 @@ long long download_chunk(HttpClient& client, const std::string& url,
 class Worker {
 public:
     Worker(int id, const std::string& url, const Expect& expect, WorkQueue& queue,
-           Storage& out, Progress& progress, StateFile& state, bool reuse);
+           Storage& out, Progress& progress, StateFile& state, bool reuse,
+           const std::string& iface);   // iface: "" = default route
 
     void run();   // call this on its own thread
 
@@ -35,6 +36,7 @@ public:
     int chunks_done() const { return chunks_done_; }
     long long bytes_done() const { return bytes_done_; }
     int retries() const { return retries_; }
+    const std::string& interface_name() const { return client_.interface_name(); }
     long connections_opened() const { return client_.connections_opened(); }
     std::exception_ptr error() const { return error_; }
 

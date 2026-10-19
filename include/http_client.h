@@ -46,6 +46,11 @@ public:
     // false = open a fresh connection for every request (for comparison tests).
     void set_reuse(bool reuse) { reuse_ = reuse; }
 
+    // Send every request of this client through one network interface
+    // ("en0" = Wi-Fi, "en5" = phone, ...). Empty = let the OS choose (default route).
+    void set_interface(const std::string& name);
+    const std::string& interface_name() const { return iface_; }
+
     // Total number of NEW connections this client has opened so far.
     long connections_opened() const { return connections_opened_; }
 
@@ -54,5 +59,7 @@ private:
 
     CURL* handle_;
     bool reuse_ = true;
+    std::string iface_;              // empty = default route
+    unsigned int iface_index_ = 0;   // OS number of iface_ (if_nametoindex)
     long connections_opened_ = 0;
 };
