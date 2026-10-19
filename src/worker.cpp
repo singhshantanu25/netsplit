@@ -1,6 +1,7 @@
 #include "worker.h"
 
 #include "errors.h"
+#include "stop.h"
 
 #include <algorithm>
 #include <chrono>
@@ -110,6 +111,7 @@ long long download_chunk(HttpClient& client, const std::string& url,
     };
 
     auto on_data = [&](const char* data, std::size_t len) {
+        if (stop_requested()) return false;   // Ctrl+C: the last write is complete, stop here
         long long left = c.size() - received;
         if (left <= 0) return false;   // already full: anything more is extra
         long long take = std::min(static_cast<long long>(len), left);
@@ -151,7 +153,10 @@ Worker::Worker(int id, const std::string& url, const Expect& expect, WorkQueue& 
 
 void Worker::run() {
     try {
-        while (auto job = queue_.pop()) {   // stops when there is nothing left
+        while (!stop_requested()) {   // Ctrl+C: take no new chunk
+            auto job = queue_.pop();
+            if (!job) break;          // nothing left (or cancelled)
+
             std::string why;
             try {
                 bytes_done_ += download_chunk(client_, url_, job->chunk, out_,
@@ -161,8 +166,10 @@ void Worker::run() {
                 queue_.done();
                 continue;
             } catch (const ConnectionFailed& e) {
+                if (stop_requested()) break;   // we stopped it ourselves: no retry
                 why = e.what();   // network problem: it usually comes back, keep trying
             } catch (const BadResponse& e) {
+                if (stop_requested()) break;
                 if (++job->bad_responses >= kMaxBadResponses)
                     throw BadResponse(std::string(e.what()) + " (gave up after " +
                                       std::to_string(kMaxBadResponses) + " tries)");
@@ -177,7 +184,7 @@ void Worker::run() {
                      std::to_string(job->failures) + " in " +
                      std::to_string(delay.count() / 1000.0).substr(0, 4) + " s");
 
-            if (!queue_.wait_unless_cancelled(delay)) break;   // another worker gave up
+            if (!queue_.wait_unless_cancelled(delay)) break;   // cancelled or Ctrl+C
             queue_.retry(*job);   // back in the queue: any worker can take it
         }
     } catch (...) {

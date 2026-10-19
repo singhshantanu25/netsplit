@@ -1,8 +1,13 @@
 #include "http_client.h"
 
 #include "errors.h"
+#include "stop.h"
 
 #include <algorithm>
+#include <cctype>
+#include <exception>
+#include <stdexcept>
+
 namespace {
 
 std::string to_lower(std::string s) {
@@ -70,6 +75,13 @@ size_t stream_cb(char* data, size_t size, size_t nmemb, void* userp) {
     return 0;   // tells libcurl to abort
 }
 
+// ---- Ctrl+C ----
+// curl calls this often while transferring, and about once a second even when
+// no data arrives, so a stalled or sleeping transfer still stops quickly.
+int xferinfo_cb(void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    return stop_requested() ? 1 : 0;   // non-zero = abort the transfer
+}
+
 // ---- headers ----
 size_t header_cb(char* data, size_t size, size_t nmemb, void* userp) {
     size_t n = size * nmemb;
@@ -104,12 +116,13 @@ void HttpClient::prepare(const std::string& url, const std::string& range,
     curl_easy_setopt(handle_, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(handle_, CURLOPT_USERAGENT, "netsplit/0.1");
     curl_easy_setopt(handle_, CURLOPT_CONNECTTIMEOUT, 15L);
-        curl_easy_setopt(handle_, CURLOPT_CONNECTTIMEOUT, 15L);
     // Stall detection: under 1 KB/s for 20 s in a row -> curl aborts with
     // CURLE_OPERATION_TIMEDOUT, which we throw as ConnectionFailed (retried).
     // No total time limit: a slow but moving download is fine.
     curl_easy_setopt(handle_, CURLOPT_LOW_SPEED_LIMIT, 1024L);   // bytes per second
     curl_easy_setopt(handle_, CURLOPT_LOW_SPEED_TIME, 20L);      // seconds
+    curl_easy_setopt(handle_, CURLOPT_NOPROGRESS, 0L);   // turn the callback on
+    curl_easy_setopt(handle_, CURLOPT_XFERINFOFUNCTION, xferinfo_cb);
     curl_easy_setopt(handle_, CURLOPT_HEADERFUNCTION, header_cb);
     curl_easy_setopt(handle_, CURLOPT_HEADERDATA, &r.headers);
     if (!range.empty())
@@ -130,9 +143,11 @@ Response HttpClient::get(const std::string& url, const std::string& range,
 
     CURLcode rc = curl_easy_perform(handle_);
     bool stopped_by_us = (rc == CURLE_WRITE_ERROR && ctx.truncated);
+    if (rc == CURLE_ABORTED_BY_CALLBACK)
+        throw ConnectionFailed("stopped (Ctrl+C)");
     if (rc != CURLE_OK && !stopped_by_us)
-                throw ConnectionFailed(std::string("request failed: ") + 
-                                 curl_easy_strerror(rc));
+        throw ConnectionFailed(std::string("request failed: ") +
+                               curl_easy_strerror(rc));
 
     curl_easy_getinfo(handle_, CURLINFO_RESPONSE_CODE, &r.status);
     long new_conns = 0;
@@ -160,9 +175,11 @@ Response HttpClient::get_stream(const std::string& url,
 
     if (ctx.error) std::rethrow_exception(ctx.error);   // header check or write failed
     bool stopped_by_us = (rc == CURLE_WRITE_ERROR && ctx.stopped);
+    if (rc == CURLE_ABORTED_BY_CALLBACK)
+        throw ConnectionFailed("stopped (Ctrl+C)");
     if (rc != CURLE_OK && !stopped_by_us)
-                throw ConnectionFailed(std::string("request failed: ") +
-                                 curl_easy_strerror(rc));
+        throw ConnectionFailed(std::string("request failed: ") +
+                               curl_easy_strerror(rc));
 
     curl_easy_getinfo(handle_, CURLINFO_RESPONSE_CODE, &r.status);
     r.truncated = ctx.stopped;   // the caller decides if that is an error

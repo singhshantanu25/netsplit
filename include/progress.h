@@ -54,7 +54,10 @@ private:
             auto now = clock::now();
             std::uint64_t bytes = done_.load();
             double secs = std::chrono::duration<double>(now - last_time).count();
-            double speed = secs > 0 ? (bytes - last_bytes) / secs / kMB : 0.0;
+            // bytes can go DOWN (a failed or paused chunk is taken back out), and
+            // unsigned subtraction would then wrap around to a huge number.
+            double speed = (secs > 0 && bytes >= last_bytes)
+                               ? (bytes - last_bytes) / secs / kMB : 0.0;
             print_line(bytes, speed);
             last_time = now;
             last_bytes = bytes;

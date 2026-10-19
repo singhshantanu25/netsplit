@@ -1,6 +1,7 @@
 #include <curl/curl.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <chrono>
@@ -20,6 +21,7 @@
 #include "probe.h"
 #include "progress.h"
 #include "resume_state.h"
+#include "stop.h"
 #include "storage.h"
 #include "work_queue.h"
 #include "worker.h"
@@ -72,7 +74,7 @@ int cmd_chunk(HttpClient& client, const std::string& url, int index) {
     Planner plan(p.size, kChunkSize);
     const Chunk& c = plan.chunk(index);
     Storage out(p.filename, p.size);
-    long long got = download_chunk(client,url,c,out,nullptr,Expect{p.size, p.etag});
+    long long got = download_chunk(client, url, c, out, nullptr, Expect{p.size, p.etag});
     std::cout << "chunk " << c.index << " (" << c.range() << ") -> " << out.path()
               << " at offset " << c.start << ", " << got << " bytes\n";
     return 0;
@@ -117,12 +119,28 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
     // Consumers: one thread per worker.
     auto start = std::chrono::steady_clock::now();
     std::vector<std::thread> pool;
+    std::atomic<int> finished{0};
     for (auto& w : workers)
-        pool.emplace_back([&w] { w->run(); });
+        pool.emplace_back([&w, &finished] { w->run(); ++finished; });
+
+    // Wait for the workers. On Ctrl+C, wake any worker that is sleeping in a
+    // backoff or waiting for the queue, so everyone exits quickly.
+    while (finished.load() < n) {
+        if (stop_requested()) queue.cancel();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
     for (auto& t : pool) t.join();
     progress.stop();
     double secs = std::chrono::duration<double>(
                       std::chrono::steady_clock::now() - start).count();
+
+    if (stop_requested()) {
+        state.save(out);   // fsync the data, then record the finished chunks
+        std::cout << "Paused: " << state.done_count() << " of " << plan.count()
+                  << " chunks saved in " << state.path() << "\n"
+                  << "Run the same command again to resume.\n";
+        return 130;   // the usual exit code after Ctrl+C
+    }
 
     for (auto& w : workers) {
         if (w->error()) {
@@ -177,6 +195,7 @@ int main(int argc, char** argv) {
 
     // Must happen once, before any thread starts using curl.
     curl_global_init(CURL_GLOBAL_DEFAULT);
+    install_stop_handler();   // Ctrl+C now pauses instead of killing
     int code = 0;
     try {
         HttpClient client;   // used by main for probe / plan / chunk
