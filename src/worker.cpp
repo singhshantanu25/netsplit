@@ -143,9 +143,9 @@ long long download_chunk(HttpClient& client, const std::string& url,
 }
 
 Worker::Worker(int id, const std::string& url, const Expect& expect, WorkQueue& queue,
-               Storage& out, Progress& progress, bool reuse)
+               Storage& out, Progress& progress, StateFile& state, bool reuse)
     : id_(id), url_(url), expect_(expect), queue_(queue), out_(out),
-      progress_(progress) {
+      progress_(progress), state_(state) {
     client_.set_reuse(reuse);
 }
 
@@ -157,6 +157,7 @@ void Worker::run() {
                 bytes_done_ += download_chunk(client_, url_, job->chunk, out_,
                                               &progress_, expect_);
                 ++chunks_done_;
+                state_.chunk_done(job->chunk.index, out_);   // record it (saved every 2 s)
                 queue_.done();
                 continue;
             } catch (const ConnectionFailed& e) {

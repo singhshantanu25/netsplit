@@ -19,6 +19,7 @@
 #include "planner.h"
 #include "probe.h"
 #include "progress.h"
+#include "resume_state.h"
 #include "storage.h"
 #include "work_queue.h"
 #include "worker.h"
@@ -70,8 +71,8 @@ int cmd_chunk(HttpClient& client, const std::string& url, int index) {
     ProbeResult p = probe_for_download(client, url);
     Planner plan(p.size, kChunkSize);
     const Chunk& c = plan.chunk(index);
-        Storage out(p.filename, p.size);
-        long long got = download_chunk(client, url, c, out, nullptr, Expect{p.size, p.etag});
+    Storage out(p.filename, p.size);
+    long long got = download_chunk(client,url,c,out,nullptr,Expect{p.size, p.etag});
     std::cout << "chunk " << c.index << " (" << c.range() << ") -> " << out.path()
               << " at offset " << c.start << ", " << got << " bytes\n";
     return 0;
@@ -91,8 +92,14 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
     std::cout << "Downloading " << final_path << " (" << p.size << " bytes, "
               << plan.count() << " chunks, " << n << " workers, connection reuse "
               << (reuse ? "on" : "OFF") << ")\n";
-  
-        Storage out(final_path, p.size);
+
+    Storage out(final_path, p.size);
+
+    // Which chunks are on disk, saved to "<name>.progress.json" as we go.
+    ResumeState fresh{url, p.size, p.etag, kChunkSize,
+                      std::vector<bool>(static_cast<std::size_t>(plan.count()), false)};
+    StateFile state(final_path + ".progress.json", fresh);
+
     Progress progress(static_cast<std::uint64_t>(p.size));
     progress.start();   // printer thread: one line per second
 
@@ -104,8 +111,8 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
     // Each worker owns its own HttpClient (curl handle).
     std::vector<std::unique_ptr<Worker>> workers;
     for (int i = 0; i < n; ++i)
-        workers.push_back(
-                        std::make_unique<Worker>(i, url, Expect{p.size, p.etag}, queue, out, progress, reuse));
+        workers.push_back(std::make_unique<Worker>(i, url, Expect{p.size, p.etag}, queue,
+                                                   out, progress, state, reuse));
 
     // Consumers: one thread per worker.
     auto start = std::chrono::steady_clock::now();
@@ -117,10 +124,14 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
     double secs = std::chrono::duration<double>(
                       std::chrono::steady_clock::now() - start).count();
 
-    for (auto& w : workers)
-        if (w->error()) std::rethrow_exception(w->error());
+    for (auto& w : workers) {
+        if (w->error()) {
+            state.save(out);   // keep what we have, so the next run can continue
+            std::rethrow_exception(w->error());
+        }
+    }
 
-        long total_conns = 0;
+    long total_conns = 0;
     int total_retries = 0;
     for (auto& w : workers) {
         std::cout << "  worker " << w->id() << ": " << w->chunks_done()
@@ -135,7 +146,7 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
               << total_conns << " connections for " << plan.count()
               << " chunks, " << total_retries << " retries\n";
 
-    out.sync();
+    state.save(out);   // all chunks done (also fsyncs the data)
 
     std::cout << "Verifying SHA-256...\n";
     std::string actual = sha256_file(part_path);
@@ -147,7 +158,8 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
         std::cout << "SHA-256 matches the expected value.\n";
     }
 
-        out.finalize();   // fsync + atomic rename + fsync the folder
+    out.finalize();   // fsync + atomic rename + fsync the folder
+    state.remove();   // finished: no progress file needed
 
     std::cout << "Saved " << final_path << "\n";
     return 0;

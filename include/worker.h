@@ -7,6 +7,7 @@
 #include "progress.h"
 #include "storage.h"
 #include "work_queue.h"
+#include "resume_state.h"
 
 // What the probe told us about the file. Every chunk answer must agree with it.
 struct Expect {
@@ -26,7 +27,7 @@ long long download_chunk(HttpClient& client, const std::string& url,
 class Worker {
 public:
     Worker(int id, const std::string& url, const Expect& expect, WorkQueue& queue,
-           Storage& out, Progress& progress, bool reuse);
+           Storage& out, Progress& progress, StateFile& state, bool reuse);
 
     void run();   // call this on its own thread
 
@@ -44,6 +45,7 @@ private:
     WorkQueue& queue_;      // shared by all workers
     Storage& out_;          // shared by all workers (pwrite at different offsets)
     Progress& progress_;    // shared by all workers
+    StateFile& state_;      // shared by all workers (records finished chunks)
     HttpClient client_;     // OWN curl handle, never shared between threads
 
     int chunks_done_ = 0;

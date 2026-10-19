@@ -9,6 +9,7 @@
 #        changed    ETag "v2" (file "changed" after the probe)
 #        flaky      first request for each chunk: connection dropped halfway
 #        stall      first request for each chunk: sends half, then goes silent
+#        slow       correct answers, but about 1 MB/s per connection
 #                   (flaky/stall fail once per chunk per server run; restart
 #                   the server to see the failures again)
 # The probe (Range: bytes=0-0) always gets a correct answer with ETag "v1".
@@ -44,7 +45,7 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("%s %s  %s\n" % (self.command, self.path, self.headers.get("Range") or ""))
 
     def send_body(self, status, start, end, etag, content_range=True,
-                  limit=None, then=None):
+        limit=None, then=None, delay=0.0):
         self.send_response(status)
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("ETag", '"%s"' % etag)
@@ -68,6 +69,8 @@ class Handler(BaseHTTPRequestHandler):
                 except (BrokenPipeError, ConnectionResetError):
                     return
                 left -= len(block)
+                if delay:
+                    time.sleep(delay)          # slow mode: pause between blocks
         if then == "drop":
             self.close_connection = True   # hang up mid-body
         elif then == "stall":
@@ -78,7 +81,7 @@ class Handler(BaseHTTPRequestHandler):
         parts = self.path.strip("/").split("/", 1)
         mode = parts[0] if parts else ""
         if mode not in ("ok", "ignore", "cap", "wrongstart", "changed",
-                        "flaky", "stall"):
+                        "flaky", "stall", "slow"):
             self.send_error(404, "unknown mode")
             return
 
@@ -112,6 +115,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_body(206, 0, length - 1, "v1")
         elif mode == "changed":
             self.send_body(206, start, end, "v2")
+        elif mode == "slow":
+            self.send_body(206, start, end, "v1", delay=0.06)   # 64 KB / 0.06 s ~ 1 MB/s
         elif mode in ("flaky", "stall"):
             if first_time((mode, start, end)):
                 half = (end - start + 1) // 2
