@@ -7,11 +7,14 @@
 #include <iostream>
 #include <mutex>
 #include <sstream>
+#include <string>
 #include <thread>
+#include <vector>
 
 // Live progress.
 // Workers only call add(): one atomic operation, no lock, very cheap.
-// A separate printer thread wakes up every second and prints MB done and speed.
+// A separate printer thread wakes up every second and prints MB done and speed,
+// plus the speed of each network ("en0 0.5 MB/s  en5 10.7 MB/s").
 class Progress {
 public:
     // already = bytes finished in an earlier run (when resuming).
@@ -23,8 +26,14 @@ public:
     Progress& operator=(const Progress&) = delete;
 
     void add(std::uint64_t bytes) { done_.fetch_add(bytes); }
-    void sub(std::uint64_t bytes) { done_.fetch_sub(bytes); }  
+    void sub(std::uint64_t bytes) { done_.fetch_sub(bytes); }   // undo a failed attempt
     std::uint64_t done() const { return done_.load(); }
+
+    // Show this counter's speed on the progress line too. Call before start().
+    // The counter only grows (bytes received on one network).
+    void add_source(const std::string& name, const std::atomic<std::uint64_t>* counter) {
+        sources_.push_back(Source{name, counter, counter->load()});
+    }
 
     void start() {
         printer_ = std::thread([this] { print_loop(); });
@@ -43,6 +52,12 @@ public:
     }
 
 private:
+    struct Source {
+        std::string name;
+        const std::atomic<std::uint64_t>* counter;
+        std::uint64_t last;   // value at the previous tick
+    };
+
     void print_loop() {
         using clock = std::chrono::steady_clock;
         auto last_time = clock::now();
@@ -60,19 +75,30 @@ private:
             // unsigned subtraction would then wrap around to a huge number.
             double speed = (secs > 0 && bytes >= last_bytes)
                                ? (bytes - last_bytes) / secs / kMB : 0.0;
-            print_line(bytes, speed);
+
+            std::ostringstream extra;   // "  | en0 0.5 MB/s  en5 10.7 MB/s"
+            extra << std::fixed << std::setprecision(1);
+            for (std::size_t i = 0; i < sources_.size(); ++i) {
+                Source& s = sources_[i];
+                std::uint64_t now_bytes = s.counter->load();
+                double v = secs > 0 ? (now_bytes - s.last) / secs / kMB : 0.0;
+                s.last = now_bytes;
+                extra << (i == 0 ? "  | " : "  ") << s.name << " " << v << " MB/s";
+            }
+
+            print_line(bytes, speed, extra.str());
             last_time = now;
             last_bytes = bytes;
             if (stop_now) break;
         }
     }
 
-    void print_line(std::uint64_t bytes, double speed) const {
+    void print_line(std::uint64_t bytes, double speed, const std::string& extra) const {
         int percent = total_ ? static_cast<int>(bytes * 100 / total_) : 100;
         std::ostringstream line;
         line << std::fixed << std::setprecision(1)
              << "\r" << bytes / kMB << " / " << total_ / kMB << " MB ("
-             << percent << "%)  " << speed << " MB/s     ";
+             << percent << "%)  " << speed << " MB/s" << extra << "     ";
         std::cout << line.str() << std::flush;
     }
 
@@ -80,6 +106,7 @@ private:
 
     const std::uint64_t total_;
     std::atomic<std::uint64_t> done_{0};   // shared by all workers
+    std::vector<Source> sources_;          // only touched by the printer thread after start()
     std::thread printer_;
     std::mutex m_;                         // only for sleeping/waking the printer
     std::condition_variable cv_;

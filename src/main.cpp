@@ -254,6 +254,9 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
 
     Progress progress(static_cast<std::uint64_t>(p.size),
                       static_cast<std::uint64_t>(already_bytes));
+    if (!specs.empty())
+        for (const auto& net : nets)   // live speed per network on the progress line
+            progress.add_source(net->iface(), &net->received_counter());
     progress.start();   // printer thread: one line per second
 
     // Producer: only the chunks that are not done yet.
@@ -320,9 +323,20 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
               << total_conns << " connections for " << remaining
               << " chunks, " << total_retries << " retries\n";
     if (!specs.empty()) {
-        for (const auto& net : nets)
-            std::cout << "  " << net->label() << ": " << net->chunks() << " chunks, "
-                      << net->kept() / (1024.0 * 1024.0) << " MB\n";
+        // One line per network: workers, chunks, MB, speed, share of this run.
+        std::cout << "Per network:\n";
+        for (const auto& net : nets) {
+            int count = 0;
+            for (Network* w : worker_net) count += (w == net.get()) ? 1 : 0;
+            double mb = net->kept() / (1024.0 * 1024.0);
+            double speed = secs > 0 ? net->received() / (1024.0 * 1024.0) / secs : 0.0;
+            double share = new_bytes > 0 ? 100.0 * net->kept() / new_bytes : 0.0;
+            std::printf("  %-18s %d workers  %3d chunks  %6.1f MB  %5.2f MB/s  %3.0f%%\n",
+                        net->label().c_str(), count, net->chunks(), mb, speed, share);
+            if (net->metered())
+                std::printf("  %-18s mobile data used: %.1f MB (incl. failed tries)\n", "",
+                            net->received() / (1024.0 * 1024.0));
+        }
     }
 
     state.save(out);   // all chunks done (also fsyncs the data)
