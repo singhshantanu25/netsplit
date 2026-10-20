@@ -103,7 +103,7 @@ void log_line(const std::string& line) {
 
 long long download_chunk(HttpClient& client, const std::string& url,
                          const Chunk& c, Storage& out, Progress* progress,
-                         const Expect& expect, Network* net) {
+                         const Expect& expect, Network* net, Reservation* mobile) {
     long long received = 0;
 
     auto on_headers = [&](long status, const Headers& h) {
@@ -111,6 +111,9 @@ long long download_chunk(HttpClient& client, const std::string& url,
     };
 
     auto on_data = [&](const char* data, std::size_t len) {
+        // Count EVERY byte that came over the phone, before anything else:
+        // even if this attempt fails later, the phone has already used this data.
+        if (mobile) mobile->consume(static_cast<std::uint64_t>(len));
         if (stop_requested()) return false;   // Ctrl+C: the last write is complete, stop here
         long long left = c.size() - received;
         if (left <= 0) return false;   // already full: anything more is extra
@@ -176,11 +179,16 @@ void Worker::run() {
 
             std::string why;
             try {
-                long long got = download_chunk(client_, url_, job->chunk, out_,
-                                               &progress_, expect_, &net_);
+                long long got = 0;
+                {
+                    // Holds this chunk's reservation. Its destructor gives back the
+                    // unused part when the block ends, also when an exception leaves it.
+                    Reservation mobile(budget_, size);
+                    got = download_chunk(client_, url_, job->chunk, out_, &progress_,
+                                         expect_, &net_, &mobile);
+                }
                 bytes_done_ += got;
                 ++chunks_done_;
-                if (budget_) budget_->use(size, size);   // reserved -> used
                 net_.add_kept(static_cast<std::uint64_t>(got));
                 net_.add_chunk();
                 state_.chunk_done(job->chunk.index, out_);   // record it (saved every 2 s)
@@ -190,7 +198,6 @@ void Worker::run() {
                     log_line("  " + net_.label() + " is back up");
                 continue;
             } catch (const ConnectionFailed& e) {
-                if (budget_) budget_->release(size);   // chunk failed: drop its reservation
                 if (stop_requested()) break;   // we stopped it ourselves: no retry
                 // The problem is THIS worker's network, not the chunk: give the chunk
                 // back right now so a worker on another network can download it.
@@ -204,7 +211,6 @@ void Worker::run() {
                 if (!queue_.wait_unless_cancelled(delay)) break;   // cancelled or Ctrl+C
                 continue;   // try the network again with the next chunk
             } catch (const BadResponse& e) {
-                if (budget_) budget_->release(size);
                 if (stop_requested()) break;
                 if (++job->bad_responses >= kMaxBadResponses)
                     throw BadResponse(std::string(e.what()) + " (gave up after " +

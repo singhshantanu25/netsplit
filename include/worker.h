@@ -19,10 +19,12 @@ struct Expect {
 
 // Downloads one chunk and writes it at its offset.
 // Throws ConnectionFailed (network) or BadResponse (wrong answer) from errors.h.
-// On failure, the bytes it added to progress are taken back out.
+// On failure, the bytes it added to progress are taken back out (but bytes
+// counted against the mobile data limit stay counted: they were really used).
 long long download_chunk(HttpClient& client, const std::string& url,
                          const Chunk& c, Storage& out, Progress* progress,
-                         const Expect& expect, Network* net = nullptr);
+                         const Expect& expect, Network* net = nullptr,
+                         Reservation* mobile = nullptr);   // counts phone bytes as they arrive
 
 // One download worker. run() takes jobs from the queue until there are none.
 // Network failure: the chunk goes back to the queue AT ONCE (another network can
