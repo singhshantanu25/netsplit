@@ -289,7 +289,9 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
     for (int i = 0; i < n; ++i)
         workers.push_back(std::make_unique<Worker>(i, url, Expect{p.size, p.etag}, queue,
                                                    out, progress, state, reuse,
-                                                   *worker_net[static_cast<std::size_t>(i)]));
+                                                   *worker_net[static_cast<std::size_t>(i)],
+                                                   worker_net[static_cast<std::size_t>(i)]->metered()
+                                                       ? budget.get() : nullptr));
 
     // Consumers: one thread per worker.
     auto start = std::chrono::steady_clock::now();
@@ -324,6 +326,16 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
         }
     }
 
+    // Every worker has stopped. If chunks are still missing, the phone hit its
+    // limit and no other network was left to finish them.
+    if (state.done_count() < plan.count()) {
+        state.save(out);
+        throw std::runtime_error(
+            "mobile data limit reached with no other network left: " +
+            std::to_string(state.done_count()) + " of " + std::to_string(plan.count()) +
+            " chunks saved. Run again with Wi-Fi or a higher --mobile-limit to finish.");
+    }
+
     long total_conns = 0;
     int total_retries = 0;
     long long new_bytes = 0;   // downloaded in THIS run
@@ -338,11 +350,11 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
         new_bytes += w->bytes_done();
     }
     if (budget && has_phone) {
-        std::uint64_t mobile = 0;
-        for (const auto& net : nets)
-            if (net->metered()) mobile += net->received();
-        std::printf("Mobile data used: %.1f MB / %.1f MB\n", mobile / (1024.0 * 1024.0),
-                    budget->limit() / (1024.0 * 1024.0));
+        int stopped = 0;
+        for (auto& w : workers) stopped += w->stopped_by_limit() ? 1 : 0;
+        std::printf("Mobile data used: %.1f MB / %.1f MB%s\n",
+                    budget->used() / (1024.0 * 1024.0), budget->limit() / (1024.0 * 1024.0),
+                    stopped > 0 ? " (limit reached, phone workers stopped)" : "");
     }
     std::cout << "Time: " << secs << " s, average "
               << (new_bytes / (1024.0 * 1024.0)) / secs << " MB/s, "

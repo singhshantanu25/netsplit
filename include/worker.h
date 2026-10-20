@@ -2,6 +2,7 @@
 #include <exception>
 #include <string>
 
+#include "data_budget.h"
 #include "http_client.h"
 #include "network.h"
 #include "planner.h"
@@ -31,7 +32,8 @@ class Worker {
 public:
     Worker(int id, const std::string& url, const Expect& expect, WorkQueue& queue,
            Storage& out, Progress& progress, StateFile& state, bool reuse,
-           Network& net);   // the network this worker downloads through
+           Network& net,                 // the network this worker downloads through
+           DataBudget* budget = nullptr);  // phone + --mobile-limit: ask before each chunk
 
     void run();   // call this on its own thread
 
@@ -39,6 +41,7 @@ public:
     int chunks_done() const { return chunks_done_; }
     long long bytes_done() const { return bytes_done_; }
     int retries() const { return retries_; }
+    bool stopped_by_limit() const { return stopped_by_limit_; }
     const Network& network() const { return net_; }
     long connections_opened() const { return client_.connections_opened(); }
     std::exception_ptr error() const { return error_; }
@@ -52,11 +55,13 @@ private:
     Progress& progress_;    // shared by all workers
     StateFile& state_;      // shared by all workers (records finished chunks)
     Network& net_;          // shared by the workers on the same network
+    DataBudget* budget_;    // shared by all phone workers; nullptr = no limit
     HttpClient client_;     // OWN curl handle, never shared between threads
 
     int chunks_done_ = 0;
     long long bytes_done_ = 0;
     int retries_ = 0;
     int net_failures_ = 0;   // connection failures in a row (sets this worker's wait)
+    bool stopped_by_limit_ = false;
     std::exception_ptr error_;
 };
