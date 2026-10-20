@@ -3,6 +3,7 @@
 #include <string>
 
 #include "http_client.h"
+#include "network.h"
 #include "planner.h"
 #include "progress.h"
 #include "storage.h"
@@ -20,7 +21,7 @@ struct Expect {
 // On failure, the bytes it added to progress are taken back out.
 long long download_chunk(HttpClient& client, const std::string& url,
                          const Chunk& c, Storage& out, Progress* progress,
-                         const Expect& expect);
+                         const Expect& expect, Network* net = nullptr);
 
 // One download worker. run() takes jobs from the queue until there are none.
 // A failed chunk waits (backoff + jitter) and goes back to the queue.
@@ -28,7 +29,7 @@ class Worker {
 public:
     Worker(int id, const std::string& url, const Expect& expect, WorkQueue& queue,
            Storage& out, Progress& progress, StateFile& state, bool reuse,
-           const std::string& iface);   // iface: "" = default route
+           Network& net);   // the network this worker downloads through
 
     void run();   // call this on its own thread
 
@@ -36,7 +37,7 @@ public:
     int chunks_done() const { return chunks_done_; }
     long long bytes_done() const { return bytes_done_; }
     int retries() const { return retries_; }
-    const std::string& interface_name() const { return client_.interface_name(); }
+    const Network& network() const { return net_; }
     long connections_opened() const { return client_.connections_opened(); }
     std::exception_ptr error() const { return error_; }
 
@@ -48,6 +49,7 @@ private:
     Storage& out_;          // shared by all workers (pwrite at different offsets)
     Progress& progress_;    // shared by all workers
     StateFile& state_;      // shared by all workers (records finished chunks)
+    Network& net_;          // shared by the workers on the same network
     HttpClient client_;     // OWN curl handle, never shared between threads
 
     int chunks_done_ = 0;

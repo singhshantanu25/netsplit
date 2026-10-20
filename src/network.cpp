@@ -91,3 +91,11 @@ const NetInterface* find_interface(const std::vector<NetInterface>& all,
         if (n.name == name) return &n;
     return nullptr;
 }
+
+std::unique_ptr<Network> make_network(const NetInterface& n) {
+    bool phone = n.kind.find("iPhone") != std::string::npos ||
+                 n.kind.find("phone") != std::string::npos ||
+                 n.ipv4.rfind("172.20.10.", 0) == 0;
+    if (phone) return std::make_unique<PhoneNetwork>(n.name, n.ipv4);
+    return std::make_unique<WifiNetwork>(n.name, n.ipv4);
+}

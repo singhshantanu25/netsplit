@@ -103,7 +103,7 @@ void log_line(const std::string& line) {
 
 long long download_chunk(HttpClient& client, const std::string& url,
                          const Chunk& c, Storage& out, Progress* progress,
-                         const Expect& expect) {
+                         const Expect& expect, Network* net) {
     long long received = 0;
 
     auto on_headers = [&](long status, const Headers& h) {
@@ -118,6 +118,7 @@ long long download_chunk(HttpClient& client, const std::string& url,
         out.write_at(c.start + received, data, static_cast<std::size_t>(take));
         received += take;
         if (progress) progress->add(static_cast<std::uint64_t>(take));
+        if (net) net->add_received(static_cast<std::uint64_t>(take));
         return take == static_cast<long long>(len);   // false = more than asked
     };
 
@@ -146,11 +147,11 @@ long long download_chunk(HttpClient& client, const std::string& url,
 
 Worker::Worker(int id, const std::string& url, const Expect& expect, WorkQueue& queue,
                Storage& out, Progress& progress, StateFile& state, bool reuse,
-               const std::string& iface)
+               Network& net)
     : id_(id), url_(url), expect_(expect), queue_(queue), out_(out),
-      progress_(progress), state_(state) {
+      progress_(progress), state_(state), net_(net) {
     client_.set_reuse(reuse);
-    client_.set_interface(iface);   // this worker's network
+    client_.set_interface(net.iface());   // bind the curl handle to this network
 }
 
 void Worker::run() {
@@ -161,9 +162,12 @@ void Worker::run() {
 
             std::string why;
             try {
-                bytes_done_ += download_chunk(client_, url_, job->chunk, out_,
-                                              &progress_, expect_);
+                long long got = download_chunk(client_, url_, job->chunk, out_,
+                                               &progress_, expect_, &net_);
+                bytes_done_ += got;
                 ++chunks_done_;
+                net_.add_kept(static_cast<std::uint64_t>(got));
+                net_.add_chunk();
                 state_.chunk_done(job->chunk.index, out_);   // record it (saved every 2 s)
                 queue_.done();
                 continue;
@@ -182,7 +186,8 @@ void Worker::run() {
             ++job->failures;
             ++retries_;
             auto delay = backoff(job->failures);
-            log_line("  [worker " + std::to_string(id_) + "] " + why + " -> retry " +
+            log_line("  [worker " + std::to_string(id_) + " " + net_.label() + "] " + why +
+                     " -> retry " +
                      std::to_string(job->failures) + " in " +
                      std::to_string(delay.count() / 1000.0).substr(0, 4) + " s");
 

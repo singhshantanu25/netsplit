@@ -10,7 +10,6 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
-#include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -47,7 +46,7 @@ void print_usage() {
               << "  netsplit plan <url>\n"
               << "  netsplit chunk <url> <index>\n"
               << "  netsplit get <url> [--workers N] [--sha256 <expected>] [--no-reuse]\n"
-              << "                     [--interfaces en0,en5]   (see: netsplit interfaces)\n";
+              << "                     [--interfaces en0,en5 | en0:3,en5:2]   (see: netsplit interfaces)\n";
 }
 
 ProbeResult probe_for_download(HttpClient& client, const std::string& url) {
@@ -57,32 +56,86 @@ ProbeResult probe_for_download(HttpClient& client, const std::string& url) {
     return p;
 }
 
-// "en0,en5" -> {"en0", "en5"}
-std::vector<std::string> split_commas(const std::string& text) {
-    std::vector<std::string> parts;
+// One entry of --interfaces: "en5" or "en5:2" (2 workers on en5).
+struct NetSpec {
+    std::string name;
+    int workers = 0;   // 0 = not given
+};
+
+// "en0:3,en5:2" -> {{"en0",3}, {"en5",2}}
+std::vector<NetSpec> parse_net_specs(const std::string& text) {
+    std::vector<NetSpec> specs;
     std::size_t start = 0;
     while (start <= text.size()) {
         std::size_t comma = text.find(',', start);
         if (comma == std::string::npos) comma = text.size();
         std::string part = text.substr(start, comma - start);
-        if (!part.empty()) parts.push_back(part);
         start = comma + 1;
+        if (part.empty()) continue;
+
+        NetSpec spec;
+        std::size_t colon = part.find(':');
+        spec.name = part.substr(0, colon);
+        if (colon != std::string::npos) {
+            spec.workers = std::stoi(part.substr(colon + 1));
+            if (spec.workers < 1)
+                throw std::runtime_error("need at least 1 worker on " + spec.name);
+        }
+        specs.push_back(spec);
     }
-    return parts;
+    return specs;
 }
 
-// Every name must be an interface that is up and has a real IPv4 address.
-void check_interfaces(const std::vector<std::string>& names) {
+// One Network object per --interfaces entry. Every name must be an interface
+// that is up and has a real IPv4 address. No entries = the OS default route.
+std::vector<std::unique_ptr<Network>> build_networks(const std::vector<NetSpec>& specs) {
+    std::vector<std::unique_ptr<Network>> nets;
+    if (specs.empty()) {
+        nets.push_back(std::make_unique<DefaultNetwork>());
+        return nets;
+    }
     std::vector<NetInterface> all = list_interfaces();
-    for (const auto& name : names) {
-        const NetInterface* n = find_interface(all, name);
+    for (const auto& spec : specs) {
+        const NetInterface* n = find_interface(all, spec.name);
         if (n == nullptr)
-            throw std::runtime_error("interface '" + name + "' has no IPv4 address "
+            throw std::runtime_error("interface '" + spec.name + "' has no IPv4 address "
                                      "(run: netsplit interfaces)");
         if (!n->up)
-            throw std::runtime_error("interface '" + name + "' (" + n->ipv4 + ", " + n->kind +
-                                     ") is not usable");
+            throw std::runtime_error("interface '" + spec.name + "' (" + n->ipv4 + ", " +
+                                     n->kind + ") is not usable");
+        nets.push_back(make_network(*n));   // WifiNetwork or PhoneNetwork
     }
+    return nets;
+}
+
+// Which network each worker uses.
+// With counts ("en0:3,en5:2"): 3 + 2 workers, mixed en0, en5, en0, en5, en0.
+// Without counts ("en0,en5"): --workers N, round-robin over the networks.
+std::vector<Network*> assign_workers(const std::vector<std::unique_ptr<Network>>& nets,
+                                     const std::vector<NetSpec>& specs, int num_workers) {
+    std::vector<Network*> plan;
+    bool counts = false;
+    for (const auto& spec : specs) counts = counts || spec.workers > 0;
+
+    if (!counts) {
+        for (int i = 0; i < num_workers; ++i)
+            plan.push_back(nets[static_cast<std::size_t>(i) % nets.size()].get());
+        return plan;
+    }
+    std::vector<int> left;
+    for (const auto& spec : specs) left.push_back(spec.workers > 0 ? spec.workers : 1);
+    bool added = true;
+    while (added) {
+        added = false;
+        for (std::size_t k = 0; k < nets.size(); ++k) {
+            if (left[k] > 0) {
+                plan.push_back(nets[k].get());
+                --left[k];
+                added = true;
+            }
+        }
+    }
+    return plan;
 }
 
 int cmd_interfaces() {
@@ -136,7 +189,7 @@ int cmd_chunk(HttpClient& client, const std::string& url, int index) {
 }
 
 int cmd_get(HttpClient& client, const std::string& url, std::string expected,
-            int num_workers, bool reuse, const std::vector<std::string>& ifaces) {
+            int num_workers, bool reuse, const std::vector<NetSpec>& specs) {
     std::transform(expected.begin(), expected.end(), expected.begin(),
                    [](unsigned char ch) { return std::tolower(ch); });
 
@@ -170,7 +223,13 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
         }
     }
     const int remaining = plan.count() - already_chunks;
-    const int n = std::min(num_workers, remaining);   // no idle workers
+
+    // The networks (Wi-Fi, phone, ...) and which one each worker uses.
+    std::vector<std::unique_ptr<Network>> nets = build_networks(specs);
+    std::vector<Network*> worker_net = assign_workers(nets, specs, num_workers);
+    if (static_cast<int>(worker_net.size()) > remaining)
+        worker_net.resize(static_cast<std::size_t>(remaining));   // no idle workers
+    const int n = static_cast<int>(worker_net.size());
 
     if (already_chunks > 0)
         std::cout << "Resuming: " << already_chunks << " of " << plan.count()
@@ -179,14 +238,14 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
               << plan.count() << " chunks, " << n << " workers, connection reuse "
               << (reuse ? "on" : "OFF") << ")\n";
 
-    // Worker i uses network ifaces[i % k]: with 4 workers and "en0,en5"
-    // that is en0, en5, en0, en5. No --interfaces = OS default route.
-    auto iface_for = [&](int i) -> std::string {
-        return ifaces.empty() ? "" : ifaces[static_cast<std::size_t>(i) % ifaces.size()];
-    };
-    if (!ifaces.empty()) {
+    if (!specs.empty()) {
         std::cout << "Networks:";
-        for (int i = 0; i < n; ++i) std::cout << " worker " << i << "=" << iface_for(i);
+        for (const auto& net : nets) {
+            int count = 0;
+            for (Network* w : worker_net) count += (w == net.get()) ? 1 : 0;
+            std::cout << "  " << net->label() << " " << net->ipv4() << " x" << count
+                      << (net->metered() ? " [mobile data]" : "");
+        }
         std::cout << "\n";
     }
 
@@ -208,7 +267,7 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
     for (int i = 0; i < n; ++i)
         workers.push_back(std::make_unique<Worker>(i, url, Expect{p.size, p.etag}, queue,
                                                    out, progress, state, reuse,
-                                                   iface_for(i)));
+                                                   *worker_net[static_cast<std::size_t>(i)]));
 
     // Consumers: one thread per worker.
     auto start = std::chrono::steady_clock::now();
@@ -246,11 +305,9 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
     long total_conns = 0;
     int total_retries = 0;
     long long new_bytes = 0;   // downloaded in THIS run
-    std::map<std::string, long long> bytes_per_iface;
     for (auto& w : workers) {
-        std::string net = w->interface_name().empty() ? "default" : w->interface_name();
-        bytes_per_iface[net] += w->bytes_done();
-        std::cout << "  worker " << w->id() << " [" << net << "]: " << w->chunks_done()
+        std::cout << "  worker " << w->id() << " [" << w->network().label() << "]: "
+                  << w->chunks_done()
                   << " chunks, " << w->bytes_done() << " bytes, "
                   << w->connections_opened() << " connection(s) opened, "
                   << w->retries() << " retries\n";
@@ -262,9 +319,10 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
               << (new_bytes / (1024.0 * 1024.0)) / secs << " MB/s, "
               << total_conns << " connections for " << remaining
               << " chunks, " << total_retries << " retries\n";
-    if (!ifaces.empty()) {
-        for (const auto& [net, bytes] : bytes_per_iface)
-            std::cout << "  " << net << ": " << bytes / (1024.0 * 1024.0) << " MB\n";
+    if (!specs.empty()) {
+        for (const auto& net : nets)
+            std::cout << "  " << net->label() << ": " << net->chunks() << " chunks, "
+                      << net->kept() / (1024.0 * 1024.0) << " MB\n";
     }
 
     state.save(out);   // all chunks done (also fsyncs the data)
@@ -320,7 +378,7 @@ int main(int argc, char** argv) {
             std::string expected;
             int num_workers = 4;   // default
             bool reuse = true;     // default
-            std::vector<std::string> ifaces;   // default: OS chooses
+            std::vector<NetSpec> specs;   // default: OS chooses
             for (int i = 3; i < argc; ++i) {
                 std::string flag = argv[i];
                 if (flag == "--no-reuse") {
@@ -333,15 +391,15 @@ int main(int argc, char** argv) {
                     else if (flag == "--workers")
                         num_workers = std::stoi(value);
                     else
-                        ifaces = split_commas(value);
+                        specs = parse_net_specs(value);
                 } else {
                     throw std::runtime_error("unknown or incomplete option " + flag);
                 }
             }
             if (num_workers < 1)
                 throw std::runtime_error("--workers must be at least 1");
-            if (!ifaces.empty()) check_interfaces(ifaces);   // fail early, before downloading
-            code = cmd_get(client, url, expected, num_workers, reuse, ifaces);
+            if (!specs.empty()) build_networks(specs);   // fail early, before the probe
+            code = cmd_get(client, url, expected, num_workers, reuse, specs);
         } else {
             print_usage();
             code = 1;
