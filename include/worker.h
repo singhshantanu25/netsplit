@@ -9,14 +9,9 @@
 #include "planner.h"
 #include "progress.h"
 #include "storage.h"
+#include "validate.h"
 #include "work_queue.h"
 #include "resume_state.h"
-
-// What the probe told us about the file. Every chunk answer must agree with it.
-struct Expect {
-    long long total;    // full file size
-    std::string etag;   // empty = server sent no ETag
-};
 
 // Downloads one chunk and writes it at its offset.
 // Throws ConnectionFailed (network) or BadResponse (wrong answer) from errors.h.

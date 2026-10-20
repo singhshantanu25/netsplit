@@ -15,6 +15,15 @@ FetchContent_Declare(json
     URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz)
 FetchContent_MakeAvailable(json)
 
-add_executable(netsplit src/main.cpp src/http_client.cpp src/probe.cpp src/planner.cpp src/storage.cpp src/hasher.cpp src/worker.cpp src/resume_state.cpp src/stop.cpp src/network.cpp src/data_budget.cpp)
+add_executable(netsplit src/main.cpp src/http_client.cpp src/probe.cpp src/planner.cpp src/storage.cpp src/hasher.cpp src/worker.cpp src/resume_state.cpp src/stop.cpp src/network.cpp src/data_budget.cpp src/validate.cpp)
 target_include_directories(netsplit PRIVATE include)
 target_link_libraries(netsplit PRIVATE CURL::libcurl nlohmann_json::nlohmann_json)
+
+# Unit tests for the pure logic (no network). Build: cmake --build build
+# Run: ./build/unit_tests   or   cd build && ctest --output-on-failure
+find_package(Threads REQUIRED)
+add_executable(unit_tests tests/unit_tests.cpp src/planner.cpp src/validate.cpp src/data_budget.cpp)
+target_include_directories(unit_tests PRIVATE include)
+target_link_libraries(unit_tests PRIVATE Threads::Threads)
+enable_testing()
+add_test(NAME unit_tests COMMAND unit_tests)
