@@ -17,7 +17,6 @@ public:
     void finalize();   // fsync, atomic rename .part -> final name, fsync the folder
 
     const std::string& path() const { return part_path_; }   // the staging file
-    const std::string& final_path() const { return final_path_; }
 
 private:
     int fd_;

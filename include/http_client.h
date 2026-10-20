@@ -49,7 +49,6 @@ public:
     // Send every request of this client through one network interface
     // ("en0" = Wi-Fi, "en5" = phone, ...). Empty = let the OS choose (default route).
     void set_interface(const std::string& name);
-    const std::string& interface_name() const { return iface_; }
 
     // Total number of NEW connections this client has opened so far.
     long connections_opened() const { return connections_opened_; }

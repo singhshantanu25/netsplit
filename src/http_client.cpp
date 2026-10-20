@@ -203,7 +203,7 @@ Response HttpClient::get_stream(const std::string& url,
                                 const DataHandler& on_data,
                                 const HeaderCheck& on_headers) {
     Response r;
-    StreamCtx ctx{handle_, &on_data, &on_headers, &r.headers};
+    StreamCtx ctx{handle_, &on_data, &on_headers, &r.headers, false, false, nullptr};
     prepare(url, range, r);
     curl_easy_setopt(handle_, CURLOPT_WRITEFUNCTION, stream_cb);
     curl_easy_setopt(handle_, CURLOPT_WRITEDATA, &ctx);   // the "user pointer"

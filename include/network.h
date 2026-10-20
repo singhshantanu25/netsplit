@@ -58,7 +58,6 @@ public:
         if (down && !before) drops_.fetch_add(1);
         return before;
     }
-    bool down() const { return down_.load(); }
     int drops() const { return drops_.load(); }   // how often it went down
     const std::atomic<bool>& down_flag() const { return down_; }
 

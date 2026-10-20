@@ -22,5 +22,5 @@ const Chunk& Planner::chunk(int i) const {
         throw std::out_of_range("chunk index " + std::to_string(i) +
                                 " out of range (0.." +
                                 std::to_string(count() - 1) + ")");
-    return chunks_[i];
+    return chunks_[static_cast<std::size_t>(i)];
 }
