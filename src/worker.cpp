@@ -150,15 +150,16 @@ long long download_chunk(HttpClient& client, const std::string& url,
 
 Worker::Worker(int id, const std::string& url, const Expect& expect, WorkQueue& queue,
                Storage& out, Progress& progress, StateFile& state, bool reuse,
-               Network& net, DataBudget* budget)
+               Network& net, DataBudget* budget, PhoneGate* gate)
     : id_(id), url_(url), expect_(expect), queue_(queue), out_(out),
-      progress_(progress), state_(state), net_(net), budget_(budget) {
+      progress_(progress), state_(state), net_(net), budget_(budget), gate_(gate) {
     client_.set_reuse(reuse);
     client_.set_interface(net.iface());   // bind the curl handle to this network
 }
 
 void Worker::run() {
     try {
+        if (gate_) gate_->wait();   // smart mode: sleep until the phone is needed
         while (!stop_requested()) {   // Ctrl+C: take no new chunk
             auto job = queue_.pop();
             if (!job) break;          // nothing left (or cancelled)

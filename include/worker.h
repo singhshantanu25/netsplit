@@ -5,6 +5,7 @@
 #include "data_budget.h"
 #include "http_client.h"
 #include "network.h"
+#include "phone_gate.h"
 #include "planner.h"
 #include "progress.h"
 #include "storage.h"
@@ -35,7 +36,8 @@ public:
     Worker(int id, const std::string& url, const Expect& expect, WorkQueue& queue,
            Storage& out, Progress& progress, StateFile& state, bool reuse,
            Network& net,                 // the network this worker downloads through
-           DataBudget* budget = nullptr);  // phone + --mobile-limit: ask before each chunk
+           DataBudget* budget = nullptr,   // phone + --mobile-limit: ask before each chunk
+           PhoneGate* gate = nullptr);     // phone + --smart: wait here until needed
 
     void run();   // call this on its own thread
 
@@ -58,6 +60,7 @@ private:
     StateFile& state_;      // shared by all workers (records finished chunks)
     Network& net_;          // shared by the workers on the same network
     DataBudget* budget_;    // shared by all phone workers; nullptr = no limit
+    PhoneGate* gate_;       // shared by all phone workers; nullptr = start at once
     HttpClient client_;     // OWN curl handle, never shared between threads
 
     int chunks_done_ = 0;

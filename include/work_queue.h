@@ -67,6 +67,12 @@ public:
         cv_.notify_all();
     }
 
+    // True when every chunk is finished (closed, empty, nothing in flight).
+    bool all_done() {
+        std::lock_guard<std::mutex> lock(m_);
+        return closed_ && pending_ == 0;
+    }
+
     // Sleeps for d, but wakes up early if the download is cancelled.
     // Returns false if it was cancelled.
     bool wait_unless_cancelled(std::chrono::milliseconds d) {

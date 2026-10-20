@@ -21,6 +21,7 @@
 #include "hasher.h"
 #include "http_client.h"
 #include "network.h"
+#include "phone_gate.h"
 #include "planner.h"
 #include "probe.h"
 #include "progress.h"
@@ -49,7 +50,9 @@ void print_usage() {
               << "  netsplit get <url> [--workers N] [--sha256 <expected>] [--no-reuse]\n"
               << "                     [--interfaces en0,en5 | en0:3,en5:2]   (see: netsplit interfaces)\n"
               << "                     [--mobile-limit 500MB [--mobile-margin 5%]]   (max mobile data;\n"
-              << "                      the margin is kept free for TCP/TLS overhead)\n";
+              << "                      the margin is kept free for TCP/TLS overhead)\n"
+              << "                     [--smart 2m]   (use the phone only if Wi-Fi alone would\n"
+              << "                      take longer than this; 90s, 2m, ...)\n";
 }
 
 ProbeResult probe_for_download(HttpClient& client, const std::string& url) {
@@ -57,6 +60,24 @@ ProbeResult probe_for_download(HttpClient& client, const std::string& url) {
     if (!p.ranges_supported || p.size <= 0)
         throw std::runtime_error("server does not support ranges, cannot split");
     return p;
+}
+
+// "90s" -> 90, "2m" -> 120, "45" -> 45 (seconds).
+double parse_duration(const std::string& text) {
+    std::size_t pos = 0;
+    double number = 0;
+    try {
+        number = std::stod(text, &pos);
+    } catch (...) {
+        throw std::runtime_error("bad duration '" + text + "' (example: 2m or 90s)");
+    }
+    std::string unit = text.substr(pos);
+    double secs = 0;
+    if (unit.empty() || unit == "s") secs = number;
+    else if (unit == "m") secs = number * 60;
+    else throw std::runtime_error("bad duration '" + text + "' (example: 2m or 90s)");
+    if (secs <= 0) throw std::runtime_error("duration must be more than 0: '" + text + "'");
+    return secs;
 }
 
 // One entry of --interfaces: "en5" or "en5:2" (2 workers on en5).
@@ -193,7 +214,7 @@ int cmd_chunk(HttpClient& client, const std::string& url, int index) {
 
 int cmd_get(HttpClient& client, const std::string& url, std::string expected,
             int num_workers, bool reuse, const std::vector<NetSpec>& specs,
-            std::uint64_t mobile_limit, double mobile_margin) {
+            std::uint64_t mobile_limit, double mobile_margin, double smart_secs) {
     std::transform(expected.begin(), expected.end(), expected.begin(),
                    [](unsigned char ch) { return std::tolower(ch); });
 
@@ -270,6 +291,18 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
             std::cout << "Note: --mobile-limit given, but no phone network is used.\n";
     }
 
+    // Smart mode: phone workers wait until Wi-Fi alone would be too slow.
+    std::unique_ptr<PhoneGate> gate;
+    if (smart_secs > 0) {
+        if (has_phone) {
+            gate = std::make_unique<PhoneGate>();
+            std::printf("Smart mode: Wi-Fi first; the phone joins only if Wi-Fi alone would "
+                        "need more than %.0f s\n", smart_secs);
+        } else {
+            std::cout << "Note: --smart given, but no phone network is used.\n";
+        }
+    }
+
     Storage out(final_path, p.size);   // keeps the existing .part data
     StateFile state(state_path, start_state);
 
@@ -293,7 +326,9 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
                                                    out, progress, state, reuse,
                                                    *worker_net[static_cast<std::size_t>(i)],
                                                    worker_net[static_cast<std::size_t>(i)]->metered()
-                                                       ? budget.get() : nullptr));
+                                                       ? budget.get() : nullptr,
+                                                   worker_net[static_cast<std::size_t>(i)]->metered()
+                                                       ? gate.get() : nullptr));
 
     // Consumers: one thread per worker.
     auto start = std::chrono::steady_clock::now();
@@ -304,8 +339,38 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
 
     // Wait for the workers. On Ctrl+C, wake any worker that is sleeping in a
     // backoff or waiting for the queue, so everyone exits quickly.
+    bool smart_reported = false;
     while (finished.load() < n) {
-        if (stop_requested()) queue.cancel();
+        if (stop_requested()) {
+            queue.cancel();
+            if (gate) gate->open();   // let waiting phone workers exit
+        }
+        if (gate && !gate->is_open()) {
+            // Smart mode: after 5 s of Wi-Fi only, estimate how long Wi-Fi alone needs.
+            double t = std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                                     start).count();
+            if (queue.all_done()) {
+                gate->open();   // finished without the phone: let its workers exit
+            } else if (t >= 5.0) {
+                std::uint64_t wifi = 0;
+                for (const auto& net : nets)
+                    if (!net->metered()) wifi += net->received();
+                double rate = wifi / t;   // bytes per second
+                double left = static_cast<double>(p.size) - static_cast<double>(progress.done());
+                double eta = rate > 0 ? left / rate : 1e9;
+                if (eta > smart_secs) {
+                    gate->open();
+                    std::printf("\n  Smart mode: Wi-Fi alone needs ~%.0f s (%.2f MB/s) > %.0f s "
+                                "-> the phone joins\n", eta, rate / (1024.0 * 1024.0),
+                                smart_secs);
+                } else if (!smart_reported) {
+                    smart_reported = true;
+                    std::printf("\n  Smart mode: Wi-Fi alone needs ~%.0f s (%.2f MB/s) <= %.0f s "
+                                "-> phone not needed (checking again every 100 ms)\n",
+                                eta, rate / (1024.0 * 1024.0), smart_secs);
+                }
+            }
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     for (auto& t : pool) t.join();
@@ -440,13 +505,14 @@ int main(int argc, char** argv) {
             // Margin for TCP/IP + TLS overhead. Measured on Day 10: the phone counted
             // ~5% more than the file bytes (26.5 MB for 24 MiB), so 5% is the default.
             double mobile_margin = 0.05;
+            double smart_secs = 0;   // 0 = smart mode off
             for (int i = 3; i < argc; ++i) {
                 std::string flag = argv[i];
                 if (flag == "--no-reuse") {
                     reuse = false;                          // flag with no value
                 } else if ((flag == "--sha256" || flag == "--workers" ||
                             flag == "--interfaces" || flag == "--mobile-limit" ||
-                            flag == "--mobile-margin") &&
+                            flag == "--mobile-margin" || flag == "--smart") &&
                            i + 1 < argc) {
                     std::string value = argv[++i];          // flag with a value
                     if (flag == "--sha256")
@@ -457,8 +523,10 @@ int main(int argc, char** argv) {
                         specs = parse_net_specs(value);
                     else if (flag == "--mobile-limit")
                         mobile_limit = parse_size(value);
-                    else
+                    else if (flag == "--mobile-margin")
                         mobile_margin = parse_percent(value);
+                    else
+                        smart_secs = parse_duration(value);
                 } else {
                     throw std::runtime_error("unknown or incomplete option " + flag);
                 }
@@ -467,7 +535,7 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("--workers must be at least 1");
             if (!specs.empty()) build_networks(specs);   // fail early, before the probe
             code = cmd_get(client, url, expected, num_workers, reuse, specs, mobile_limit,
-                           mobile_margin);
+                           mobile_margin, smart_secs);
         } else {
             print_usage();
             code = 1;
