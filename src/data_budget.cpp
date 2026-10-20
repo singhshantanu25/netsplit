@@ -7,6 +7,8 @@
 DataBudget::DataBudget(std::uint64_t limit, double margin_fraction)
     : limit_(limit), margin_(static_cast<std::uint64_t>(limit * margin_fraction)) {
     if (limit == 0) throw std::invalid_argument("mobile limit must be more than 0");
+    if (margin_fraction < 0 || margin_fraction > 0.5)
+        throw std::invalid_argument("margin must be between 0% and 50%");
 }
 
 bool DataBudget::try_reserve(std::uint64_t bytes) {
@@ -58,4 +60,22 @@ std::uint64_t parse_size(const std::string& text) {
 
     if (number <= 0) throw std::runtime_error("size must be more than 0: '" + text + "'");
     return static_cast<std::uint64_t>(number * factor);
+}
+
+double parse_percent(const std::string& text) {
+    std::size_t pos = 0;
+    double number = 0;
+    try {
+        number = std::stod(text, &pos);
+    } catch (...) {
+        throw std::runtime_error("bad percentage '" + text + "' (example: 3%)");
+    }
+    std::string rest = text.substr(pos);
+    double fraction = 0;
+    if (rest == "%") fraction = number / 100.0;
+    else if (rest.empty()) fraction = number;   // already a fraction: 0.03
+    else throw std::runtime_error("bad percentage '" + text + "' (example: 3%)");
+    if (fraction < 0 || fraction > 0.5)
+        throw std::runtime_error("margin must be between 0% and 50%: '" + text + "'");
+    return fraction;
 }

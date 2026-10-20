@@ -36,6 +36,7 @@ public:
     std::uint64_t reserved() const;
     std::uint64_t limit() const { return limit_; }
     std::uint64_t usable() const { return limit_ - margin_; }   // limit - margin
+    std::uint64_t margin() const { return margin_; }
 
 private:
     mutable std::mutex m_;
@@ -72,6 +73,9 @@ private:
     DataBudget* budget_;   // nullptr = no limit (Wi-Fi worker)
     std::uint64_t left_;   // reserved but not received yet
 };
+
+// "3%" -> 0.03, "0.03" -> 0.03. Allowed: 0% to 50%. Throws on bad input.
+double parse_percent(const std::string& text);
 
 // "500MB" -> 524288000, "1.5GB", "800M", "1048576" (bytes). MB = 1024*1024 bytes,
 // like every "MB" NetSplit prints. Throws on bad input.

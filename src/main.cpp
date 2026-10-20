@@ -48,7 +48,8 @@ void print_usage() {
               << "  netsplit chunk <url> <index>\n"
               << "  netsplit get <url> [--workers N] [--sha256 <expected>] [--no-reuse]\n"
               << "                     [--interfaces en0,en5 | en0:3,en5:2]   (see: netsplit interfaces)\n"
-              << "                     [--mobile-limit 500MB]   (max mobile data for this run)\n";
+              << "                     [--mobile-limit 500MB [--mobile-margin 5%]]   (max mobile data;\n"
+              << "                      the margin is kept free for TCP/TLS overhead)\n";
 }
 
 ProbeResult probe_for_download(HttpClient& client, const std::string& url) {
@@ -192,7 +193,7 @@ int cmd_chunk(HttpClient& client, const std::string& url, int index) {
 
 int cmd_get(HttpClient& client, const std::string& url, std::string expected,
             int num_workers, bool reuse, const std::vector<NetSpec>& specs,
-            std::uint64_t mobile_limit) {
+            std::uint64_t mobile_limit, double mobile_margin) {
     std::transform(expected.begin(), expected.end(), expected.begin(),
                    [](unsigned char ch) { return std::tolower(ch); });
 
@@ -258,12 +259,13 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
     bool has_phone = false;
     for (const auto& net : nets) has_phone = has_phone || net->metered();
     if (mobile_limit > 0) {
-        budget = std::make_unique<DataBudget>(mobile_limit);
+        budget = std::make_unique<DataBudget>(mobile_limit, mobile_margin);
         if (has_phone)
             std::printf("Mobile data limit: %.1f MB (phone workers stop at %.1f MB, "
-                        "5%% kept free for TCP/TLS overhead)\n",
+                        "%.0f%% = %.1f MB kept free for TCP/TLS overhead)\n",
                         budget->limit() / (1024.0 * 1024.0),
-                        budget->usable() / (1024.0 * 1024.0));
+                        budget->usable() / (1024.0 * 1024.0), mobile_margin * 100,
+                        budget->margin() / (1024.0 * 1024.0));
         else
             std::cout << "Note: --mobile-limit given, but no phone network is used.\n";
     }
@@ -435,12 +437,16 @@ int main(int argc, char** argv) {
             bool reuse = true;     // default
             std::vector<NetSpec> specs;   // default: OS chooses
             std::uint64_t mobile_limit = 0;   // 0 = no limit
+            // Margin for TCP/IP + TLS overhead. Measured on Day 10: the phone counted
+            // ~5% more than the file bytes (26.5 MB for 24 MiB), so 5% is the default.
+            double mobile_margin = 0.05;
             for (int i = 3; i < argc; ++i) {
                 std::string flag = argv[i];
                 if (flag == "--no-reuse") {
                     reuse = false;                          // flag with no value
                 } else if ((flag == "--sha256" || flag == "--workers" ||
-                            flag == "--interfaces" || flag == "--mobile-limit") &&
+                            flag == "--interfaces" || flag == "--mobile-limit" ||
+                            flag == "--mobile-margin") &&
                            i + 1 < argc) {
                     std::string value = argv[++i];          // flag with a value
                     if (flag == "--sha256")
@@ -449,8 +455,10 @@ int main(int argc, char** argv) {
                         num_workers = std::stoi(value);
                     else if (flag == "--interfaces")
                         specs = parse_net_specs(value);
-                    else
+                    else if (flag == "--mobile-limit")
                         mobile_limit = parse_size(value);
+                    else
+                        mobile_margin = parse_percent(value);
                 } else {
                     throw std::runtime_error("unknown or incomplete option " + flag);
                 }
@@ -458,7 +466,8 @@ int main(int argc, char** argv) {
             if (num_workers < 1)
                 throw std::runtime_error("--workers must be at least 1");
             if (!specs.empty()) build_networks(specs);   // fail early, before the probe
-            code = cmd_get(client, url, expected, num_workers, reuse, specs, mobile_limit);
+            code = cmd_get(client, url, expected, num_workers, reuse, specs, mobile_limit,
+                           mobile_margin);
         } else {
             print_usage();
             code = 1;
