@@ -24,7 +24,9 @@ long long download_chunk(HttpClient& client, const std::string& url,
                          const Expect& expect, Network* net = nullptr);
 
 // One download worker. run() takes jobs from the queue until there are none.
-// A failed chunk waits (backoff + jitter) and goes back to the queue.
+// Network failure: the chunk goes back to the queue AT ONCE (another network can
+// take it) and this worker waits (backoff + jitter) before trying its network again.
+// Wrong server answer: the chunk itself waits, then goes back to the queue.
 class Worker {
 public:
     Worker(int id, const std::string& url, const Expect& expect, WorkQueue& queue,
@@ -55,5 +57,6 @@ private:
     int chunks_done_ = 0;
     long long bytes_done_ = 0;
     int retries_ = 0;
+    int net_failures_ = 0;   // connection failures in a row (sets this worker's wait)
     std::exception_ptr error_;
 };

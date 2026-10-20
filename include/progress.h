@@ -31,8 +31,10 @@ public:
 
     // Show this counter's speed on the progress line too. Call before start().
     // The counter only grows (bytes received on one network).
-    void add_source(const std::string& name, const std::atomic<std::uint64_t>* counter) {
-        sources_.push_back(Source{name, counter, counter->load()});
+    // down (optional): when true, the line shows "DOWN" instead of a speed.
+    void add_source(const std::string& name, const std::atomic<std::uint64_t>* counter,
+                    const std::atomic<bool>* down = nullptr) {
+        sources_.push_back(Source{name, counter, down, counter->load()});
     }
 
     void start() {
@@ -55,6 +57,7 @@ private:
     struct Source {
         std::string name;
         const std::atomic<std::uint64_t>* counter;
+        const std::atomic<bool>* down;
         std::uint64_t last;   // value at the previous tick
     };
 
@@ -83,7 +86,11 @@ private:
                 std::uint64_t now_bytes = s.counter->load();
                 double v = secs > 0 ? (now_bytes - s.last) / secs / kMB : 0.0;
                 s.last = now_bytes;
-                extra << (i == 0 ? "  | " : "  ") << s.name << " " << v << " MB/s";
+                extra << (i == 0 ? "  | " : "  ") << s.name << " ";
+                if (s.down && s.down->load())
+                    extra << "DOWN";
+                else
+                    extra << v << " MB/s";
             }
 
             print_line(bytes, speed, extra.str());

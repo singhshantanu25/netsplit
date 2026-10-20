@@ -51,12 +51,25 @@ public:
     int chunks() const { return chunks_.load(); }
     const std::atomic<std::uint64_t>& received_counter() const { return received_; }
 
+    // Down = its workers cannot connect right now (phone unplugged, Wi-Fi gone).
+    // Returns the previous value, so only ONE worker reports the change.
+    bool set_down(bool down) {
+        bool before = down_.exchange(down);
+        if (down && !before) drops_.fetch_add(1);
+        return before;
+    }
+    bool down() const { return down_.load(); }
+    int drops() const { return drops_.load(); }   // how often it went down
+    const std::atomic<bool>& down_flag() const { return down_; }
+
 private:
     std::string iface_;
     std::string ipv4_;
     std::atomic<std::uint64_t> received_{0};
     std::atomic<std::uint64_t> kept_{0};
     std::atomic<int> chunks_{0};
+    std::atomic<bool> down_{false};
+    std::atomic<int> drops_{0};
 };
 
 class WifiNetwork : public Network {

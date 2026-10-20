@@ -183,8 +183,9 @@ Response HttpClient::get(const std::string& url, const std::string& range,
 
     CURLcode rc = curl_easy_perform(handle_);
     bool stopped_by_us = (rc == CURLE_WRITE_ERROR && ctx.truncated);
-    if (rc == CURLE_ABORTED_BY_CALLBACK)
-        throw ConnectionFailed("stopped (Ctrl+C)");
+    if (rc == CURLE_ABORTED_BY_CALLBACK)   // our progress or socket callback said stop
+        throw ConnectionFailed(stop_requested() ? "stopped (Ctrl+C)"
+                                                : "cannot use interface " + iface_);
     if (rc != CURLE_OK && !stopped_by_us)
         throw ConnectionFailed(std::string("request failed: ") +
                                curl_easy_strerror(rc));
@@ -215,8 +216,9 @@ Response HttpClient::get_stream(const std::string& url,
 
     if (ctx.error) std::rethrow_exception(ctx.error);   // header check or write failed
     bool stopped_by_us = (rc == CURLE_WRITE_ERROR && ctx.stopped);
-    if (rc == CURLE_ABORTED_BY_CALLBACK)
-        throw ConnectionFailed("stopped (Ctrl+C)");
+    if (rc == CURLE_ABORTED_BY_CALLBACK)   // our progress or socket callback said stop
+        throw ConnectionFailed(stop_requested() ? "stopped (Ctrl+C)"
+                                                : "cannot use interface " + iface_);
     if (rc != CURLE_OK && !stopped_by_us)
         throw ConnectionFailed(std::string("request failed: ") +
                                curl_easy_strerror(rc));

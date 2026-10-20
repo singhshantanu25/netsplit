@@ -170,10 +170,23 @@ void Worker::run() {
                 net_.add_chunk();
                 state_.chunk_done(job->chunk.index, out_);   // record it (saved every 2 s)
                 queue_.done();
+                net_failures_ = 0;
+                if (net_.set_down(false))   // it was down and works again
+                    log_line("  " + net_.label() + " is back up");
                 continue;
             } catch (const ConnectionFailed& e) {
                 if (stop_requested()) break;   // we stopped it ourselves: no retry
-                why = e.what();   // network problem: it usually comes back, keep trying
+                // The problem is THIS worker's network, not the chunk: give the chunk
+                // back right now so a worker on another network can download it.
+                queue_.retry(*job);
+                ++retries_;
+                ++net_failures_;
+                if (!net_.set_down(true))     // first worker to notice reports it
+                    log_line("  " + net_.label() + " is down (" + e.what() +
+                             "): its chunks go back to the queue");
+                auto delay = backoff(net_failures_);
+                if (!queue_.wait_unless_cancelled(delay)) break;   // cancelled or Ctrl+C
+                continue;   // try the network again with the next chunk
             } catch (const BadResponse& e) {
                 if (stop_requested()) break;
                 if (++job->bad_responses >= kMaxBadResponses)
@@ -183,12 +196,12 @@ void Worker::run() {
             }
             // Anything else (disk full, ...) is not caught here: it ends the download.
 
+            // Wrong answer from the server: the chunk waits, then goes back to the queue.
             ++job->failures;
             ++retries_;
             auto delay = backoff(job->failures);
             log_line("  [worker " + std::to_string(id_) + " " + net_.label() + "] " + why +
-                     " -> retry " +
-                     std::to_string(job->failures) + " in " +
+                     " -> retry " + std::to_string(job->failures) + " in " +
                      std::to_string(delay.count() / 1000.0).substr(0, 4) + " s");
 
             if (!queue_.wait_unless_cancelled(delay)) break;   // cancelled or Ctrl+C
