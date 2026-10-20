@@ -15,6 +15,6 @@ FetchContent_Declare(json
     URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz)
 FetchContent_MakeAvailable(json)
 
-add_executable(netsplit src/main.cpp src/http_client.cpp src/probe.cpp src/planner.cpp src/storage.cpp src/hasher.cpp src/worker.cpp src/resume_state.cpp src/stop.cpp src/network.cpp)
+add_executable(netsplit src/main.cpp src/http_client.cpp src/probe.cpp src/planner.cpp src/storage.cpp src/hasher.cpp src/worker.cpp src/resume_state.cpp src/stop.cpp src/network.cpp src/data_budget.cpp)
 target_include_directories(netsplit PRIVATE include)
 target_link_libraries(netsplit PRIVATE CURL::libcurl nlohmann_json::nlohmann_json)

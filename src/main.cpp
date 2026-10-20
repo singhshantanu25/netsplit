@@ -17,6 +17,7 @@
 #include <thread>
 #include <vector>
 
+#include "data_budget.h"
 #include "hasher.h"
 #include "http_client.h"
 #include "network.h"
@@ -46,7 +47,8 @@ void print_usage() {
               << "  netsplit plan <url>\n"
               << "  netsplit chunk <url> <index>\n"
               << "  netsplit get <url> [--workers N] [--sha256 <expected>] [--no-reuse]\n"
-              << "                     [--interfaces en0,en5 | en0:3,en5:2]   (see: netsplit interfaces)\n";
+              << "                     [--interfaces en0,en5 | en0:3,en5:2]   (see: netsplit interfaces)\n"
+              << "                     [--mobile-limit 500MB]   (max mobile data for this run)\n";
 }
 
 ProbeResult probe_for_download(HttpClient& client, const std::string& url) {
@@ -189,7 +191,8 @@ int cmd_chunk(HttpClient& client, const std::string& url, int index) {
 }
 
 int cmd_get(HttpClient& client, const std::string& url, std::string expected,
-            int num_workers, bool reuse, const std::vector<NetSpec>& specs) {
+            int num_workers, bool reuse, const std::vector<NetSpec>& specs,
+            std::uint64_t mobile_limit) {
     std::transform(expected.begin(), expected.end(), expected.begin(),
                    [](unsigned char ch) { return std::tolower(ch); });
 
@@ -231,6 +234,7 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
         worker_net.resize(static_cast<std::size_t>(remaining));   // no idle workers
     const int n = static_cast<int>(worker_net.size());
 
+
     if (already_chunks > 0)
         std::cout << "Resuming: " << already_chunks << " of " << plan.count()
                   << " chunks already done (" << already_bytes << " bytes)\n";
@@ -247,6 +251,21 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
                       << (net->metered() ? " [mobile data]" : "");
         }
         std::cout << "\n";
+    }
+
+    // Mobile data budget (only when --mobile-limit is given).
+    std::unique_ptr<DataBudget> budget;
+    bool has_phone = false;
+    for (const auto& net : nets) has_phone = has_phone || net->metered();
+    if (mobile_limit > 0) {
+        budget = std::make_unique<DataBudget>(mobile_limit);
+        if (has_phone)
+            std::printf("Mobile data limit: %.1f MB (phone workers stop at %.1f MB, "
+                        "5%% kept free for TCP/TLS overhead)\n",
+                        budget->limit() / (1024.0 * 1024.0),
+                        budget->usable() / (1024.0 * 1024.0));
+        else
+            std::cout << "Note: --mobile-limit given, but no phone network is used.\n";
     }
 
     Storage out(final_path, p.size);   // keeps the existing .part data
@@ -317,6 +336,13 @@ int cmd_get(HttpClient& client, const std::string& url, std::string expected,
         total_conns += w->connections_opened();
         total_retries += w->retries();
         new_bytes += w->bytes_done();
+    }
+    if (budget && has_phone) {
+        std::uint64_t mobile = 0;
+        for (const auto& net : nets)
+            if (net->metered()) mobile += net->received();
+        std::printf("Mobile data used: %.1f MB / %.1f MB\n", mobile / (1024.0 * 1024.0),
+                    budget->limit() / (1024.0 * 1024.0));
     }
     std::cout << "Time: " << secs << " s, average "
               << (new_bytes / (1024.0 * 1024.0)) / secs << " MB/s, "
@@ -396,19 +422,23 @@ int main(int argc, char** argv) {
             int num_workers = 4;   // default
             bool reuse = true;     // default
             std::vector<NetSpec> specs;   // default: OS chooses
+            std::uint64_t mobile_limit = 0;   // 0 = no limit
             for (int i = 3; i < argc; ++i) {
                 std::string flag = argv[i];
                 if (flag == "--no-reuse") {
                     reuse = false;                          // flag with no value
                 } else if ((flag == "--sha256" || flag == "--workers" ||
-                            flag == "--interfaces") && i + 1 < argc) {
+                            flag == "--interfaces" || flag == "--mobile-limit") &&
+                           i + 1 < argc) {
                     std::string value = argv[++i];          // flag with a value
                     if (flag == "--sha256")
                         expected = value;
                     else if (flag == "--workers")
                         num_workers = std::stoi(value);
-                    else
+                    else if (flag == "--interfaces")
                         specs = parse_net_specs(value);
+                    else
+                        mobile_limit = parse_size(value);
                 } else {
                     throw std::runtime_error("unknown or incomplete option " + flag);
                 }
@@ -416,7 +446,7 @@ int main(int argc, char** argv) {
             if (num_workers < 1)
                 throw std::runtime_error("--workers must be at least 1");
             if (!specs.empty()) build_networks(specs);   // fail early, before the probe
-            code = cmd_get(client, url, expected, num_workers, reuse, specs);
+            code = cmd_get(client, url, expected, num_workers, reuse, specs, mobile_limit);
         } else {
             print_usage();
             code = 1;
